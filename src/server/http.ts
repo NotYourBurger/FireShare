@@ -44,6 +44,7 @@ const DEFAULT_TRANSFER: TransferConfig = {
   mode: "proxy",
   directEndpoint: null,
   appOrigin: null,
+  directNetworks: null,
 };
 
 /**
@@ -75,6 +76,17 @@ export function createHttpHandlers({
     if (origin === configuredCorsOrigin) return;
     await ensureCors(origin);
     configuredCorsOrigin = origin;
+  }
+
+  /**
+   * Whether this request's files travel straight to and from storage: always
+   * in `direct` mode, and in `auto` mode when the trusted client IP is in
+   * `DIRECT_NETWORKS`.
+   */
+  function isDirect(req: Request): boolean {
+    if (transfer.mode !== "auto") return transfer.mode === "direct";
+    const client = access.clientAddress(req.headers);
+    return client !== null && transfer.directNetworks!.has(client);
   }
 
   /** Counts the request against `limiter`; returns the seconds to wait if it's over, else 0. */
@@ -157,9 +169,10 @@ export function createHttpHandlers({
       if (refused) return refused;
       const newShare = parseNewShare(await req.json().catch(() => null), expiry);
       if (typeof newShare === "string") return json(400, { error: newShare });
+      const direct = isDirect(req);
       let share;
       try {
-        if (transfer.mode === "direct") {
+        if (direct) {
           await ensureDirectCors(req);
         }
         share = await shares.createShare({ ...newShare, clientIp: access.clientAddress(req.headers) });
@@ -167,7 +180,8 @@ export function createHttpHandlers({
         if (err instanceof ShareError) return json(errorStatus[err.code], { error: err.message });
         throw err;
       }
-      if (transfer.mode === "direct") {
+      if (direct) {
+        // The upload form tells the two paths apart by `partUrls`.
         const files = await Promise.all(
           share.files.map(async (file) => {
             const direct = await shares.getDirectUpload(file.id, upload.chunkSize);
@@ -203,7 +217,8 @@ export function createHttpHandlers({
     async getUpload(req: Request, uploadId: string) {
       const refused = refuseJson(req);
       if (refused) return refused;
-      if (transfer.mode !== "direct") return json(405, { error: "Direct upload is not enabled" });
+      if (transfer.mode === "proxy") return json(405, { error: "Direct upload is not enabled" });
+      if (!isDirect(req)) return json(403, { error: DIRECT_NETWORK_ERROR });
       await ensureDirectCors(req);
       const direct = await shares.getDirectUpload(uploadId, upload.chunkSize);
       if (!direct) return json(404, { error: "No such upload" });
@@ -225,7 +240,9 @@ export function createHttpHandlers({
 
     /**
      * PATCH /api/uploads/:id — tus chunk, streamed straight into storage.
-     * Every chunk must carry its SHA-256 in `Upload-Checksum`.
+     * Every chunk must carry its SHA-256 in `Upload-Checksum`. In `auto` mode
+     * anyone may upload this way, so an upload begun through the app resumes
+     * through it from any network.
      */
     async patchUpload(req: Request, uploadId: string) {
       const rejected = checkTusVersion(req) ?? refuseTus(req);
@@ -291,7 +308,7 @@ export function createHttpHandlers({
 
     /**
      * GET /d/:token/files/:fileId — streams one shared file as an attachment,
-     * or redirects to a short-lived presigned storage URL in direct mode.
+     * or redirects to a short-lived presigned storage URL for direct clients.
      */
     async download(req: Request, token: string, fileId: string) {
       const refused = refuseDownload(req);
@@ -300,7 +317,7 @@ export function createHttpHandlers({
         const file = await shares.openDownload(token, fileId);
         if (file === "unavailable") return html(410, UNAVAILABLE_PAGE);
         if (!file) return html(404, NOT_FOUND_PAGE);
-        if (transfer.mode === "direct") {
+        if (isDirect(req)) {
           const location = await file.presign(contentDisposition(file.name));
           return new Response(null, {
             status: 302,
@@ -343,6 +360,9 @@ const accessStatus = { password: 401, network: 403 } as const;
 
 const rateLimitedMessage = (seconds: number) =>
   `Too many requests from your network. Try again in ${seconds} second${seconds === 1 ? "" : "s"}.`;
+
+const DIRECT_NETWORK_ERROR =
+  "This upload went straight to storage, which only works from the network it began on. Reconnect to that network to resume it, or start again.";
 
 const ACCESS_ERROR = {
   password: "Enter the upload password to upload. If you already did, your session has ended: reload the page.",

@@ -198,7 +198,7 @@ describe("direct chunked upload", () => {
       expiry: loadExpiryConfig({}),
       upload: loadUploadConfig({ UPLOAD_CHUNK_SIZE: "5MB" }),
       access: createUploadAccess(loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: "abuse@example.com" })),
-      transfer: { mode: "direct", directEndpoint: "https://storage.local:9000", appOrigin: null },
+      transfer: { mode: "direct", directEndpoint: "https://storage.local:9000", appOrigin: null, directNetworks: null },
       ensureCors: (o) => memStorage.ensureCors(o),
     });
   });
@@ -254,6 +254,17 @@ describe("direct chunked upload", () => {
 
     const finRes = await directHttp.finalize(new Request(`${origin}/api/shares/${shareId}/finalize`), shareId);
     expect(finRes.status).toBe(200);
+  });
+
+  it("shows why the server refused to resume a direct upload", async () => {
+    const refused = (async () => Response.json({ error: "Reconnect to resume" }, { status: 403 })) as typeof globalThis.fetch;
+    await expect(
+      uploadFile(new Blob([data]), `${origin}/api/uploads/${crypto.randomUUID()}`, {
+        chunkSize: CHUNK,
+        direct: true,
+        fetch: refused,
+      }),
+    ).rejects.toThrow("Reconnect to resume");
   });
 
   it("resumes an interrupted direct upload from the last completed part", async () => {

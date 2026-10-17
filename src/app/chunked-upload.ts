@@ -181,7 +181,8 @@ async function fetchDirectUploadStatus(
 ): Promise<{ size: number; offset: number; partUrls: string[] }> {
   const res = await fetchFn(uploadUrl, { method: "GET", cache: "no-store", signal });
   if (!res.ok) {
-    throw new Error(`Upload status query failed (${res.status})`);
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error ?? `Upload status query failed (${res.status})`);
   }
   return res.json();
 }

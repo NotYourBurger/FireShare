@@ -34,6 +34,7 @@ services:
       TRANSFER_MODE: ${TRANSFER_MODE:-}
       STORAGE_DIRECT_ENDPOINT: ${STORAGE_DIRECT_ENDPOINT:-}
       APP_ORIGIN: ${APP_ORIGIN:-}
+      DIRECT_NETWORKS: ${DIRECT_NETWORKS:-}
     ports:
       - "${APP_PORT:-3000}:3000"
     depends_on:

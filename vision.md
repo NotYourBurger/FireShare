@@ -80,6 +80,8 @@ FireShare gives teams the same simple upload-and-share experience while keeping 
 
 **Client network detection (`auto`)**
 - The client IP is taken from `X-Forwarded-For` only when the request comes from a proxy listed in `TRUSTED_PROXIES` (for example DSM's reverse proxy). This stops clients from forging a LAN address.
+- The mode is chosen per request: each upload when it starts, and each file download. The browser keeps an upload on the path it started on, so a direct upload resumes only from `DIRECT_NETWORKS`; an upload through the app resumes from anywhere.
+- Shares don't remember their path: a file uploaded directly downloads through the app, and the reverse.
 
 ---
 

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PEER_ADDRESS_HEADER, parseNetworks } from "./client-address";
 import { loadAccessConfig, loadExpiryConfig, loadUploadConfig } from "./config";
 import { createCleanup } from "./cleanup";
 import type { Database } from "./db";
@@ -679,7 +680,7 @@ describe("direct transfer mode", () => {
       expiry: loadExpiryConfig({ EXPIRY_OPTIONS: "12h,1d,7d", EXPIRY_DEFAULT: "1d" }),
       upload: loadUploadConfig({ UPLOAD_CHUNK_SIZE: "5MB", UPLOAD_PARALLEL_FILES: "2" }),
       access: createUploadAccess(loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: "abuse@example.com" })),
-      transfer: { mode: "direct", directEndpoint: "https://storage.local:9000", appOrigin: null },
+      transfer: { mode: "direct", directEndpoint: "https://storage.local:9000", appOrigin: null, directNetworks: null },
       ensureCors: (o) => memStorage.ensureCors(o),
     });
   });
@@ -791,5 +792,169 @@ describe("direct transfer mode", () => {
     expect(rest.status).toBe(206);
     expect(Buffer.from(await rest.arrayBuffer()).equals(full.subarray(1000))).toBe(true);
     expect((await unzip(full)).map((e) => e.crc32)).toEqual(entries.map((e) => e.crc32));
+  });
+});
+
+describe("auto transfer mode", () => {
+  const LAN = "192.168.1.20";
+  const INTERNET = "203.0.113.5";
+  const PROXY = "172.16.0.2";
+  let memStorage: ReturnType<typeof createMemoryStorage>;
+  let autoHttp: HttpHandlers;
+
+  beforeEach(async () => {
+    clock = new Date("2026-01-01T00:00:00Z");
+    memStorage = createMemoryStorage({ now: () => clock });
+    autoHttp = createHttpHandlers({
+      shares: createShareService({ db: await createTestDb(), storage: memStorage, now: () => clock }),
+      expiry: loadExpiryConfig({ EXPIRY_OPTIONS: "12h,1d,7d", EXPIRY_DEFAULT: "1d" }),
+      upload: loadUploadConfig({ UPLOAD_CHUNK_SIZE: "5MB", UPLOAD_PARALLEL_FILES: "2" }),
+      access: createUploadAccess(
+        loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: "abuse@example.com", TRUSTED_PROXIES: `${PROXY}/32` }),
+      ),
+      transfer: {
+        mode: "auto",
+        directEndpoint: "https://storage.local:9000",
+        appOrigin: null,
+        directNetworks: parseNetworks("192.168.1.0/24,10.8.0.0/16", "DIRECT_NETWORKS"),
+      },
+      ensureCors: (o) => memStorage.ensureCors(o),
+    });
+  });
+
+  /** Headers of a request whose socket comes from `peer`. */
+  const from = (peer: string, headers: Record<string, string> = {}) => ({ [PEER_ADDRESS_HEADER]: peer, ...headers });
+
+  async function createFrom(headers: Record<string, string>, data: Buffer) {
+    const res = await autoHttp.createShare(
+      new Request(`${origin}/api/shares`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ files: [{ name: "plate.exr", size: data.length }] }),
+      }),
+    );
+    expect(res.status).toBe(201);
+    return res.json();
+  }
+
+  /** Uploads `data` as one tus chunk through the app. */
+  async function patchFrom(headers: Record<string, string>, fileId: string, data: Buffer) {
+    return autoHttp.patchUpload(
+      new Request(`${origin}/api/uploads/${fileId}`, {
+        method: "PATCH",
+        headers: {
+          ...headers,
+          "Tus-Resumable": "1.0.0",
+          "Content-Type": "application/offset+octet-stream",
+          "Upload-Offset": "0",
+          "Content-Length": String(data.length),
+          "Upload-Checksum": checksum(data),
+        },
+        body: new Uint8Array(data),
+      }),
+      fileId,
+    );
+  }
+
+  async function finalizeShare(shareId: string) {
+    const res = await autoHttp.finalize(new Request(`${origin}/api/shares/${shareId}/finalize`, { method: "POST" }), shareId);
+    expect(res.status).toBe(200);
+    const { path } = await res.json();
+    return path.slice("/d/".length) as string;
+  }
+
+  function downloadFrom(headers: Record<string, string>, token: string, fileId: string) {
+    return autoHttp.download(new Request(`${origin}/d/${token}/files/${fileId}`, { headers }), token, fileId);
+  }
+
+  /** The file's bytes as the client gets them: streamed by the app, or from storage after a redirect. */
+  async function fetchFile(res: Response): Promise<Buffer> {
+    const body = res.status === 302 ? await memStorage.fetch(new Request(res.headers.get("Location")!)) : res;
+    expect(body.status).toBe(200);
+    return Buffer.from(await body.arrayBuffer());
+  }
+
+  it("uploads a LAN client's file directly, and serves it through the app to the internet", async () => {
+    const data = Buffer.alloc(MIN_PART_SIZE + 4, 0x42);
+    const created = await createFrom(from(LAN), data);
+    const file = created.files[0];
+    expect(file.partUrls).toHaveLength(2);
+    expect(memStorage.corsOrigins()).toEqual([origin]);
+    for (const [i, url] of (file.partUrls as string[]).entries()) {
+      const part = data.subarray(i * MIN_PART_SIZE, (i + 1) * MIN_PART_SIZE);
+      expect((await memStorage.fetch(new Request(url, { method: "PUT", body: part }))).status).toBe(200);
+    }
+    const token = await finalizeShare(created.id);
+
+    const outside = await downloadFrom(from(INTERNET), token, file.id);
+    expect(outside.status).toBe(200);
+    expect((await fetchFile(outside)).equals(data)).toBe(true);
+
+    const inside = await downloadFrom(from(LAN), token, file.id);
+    expect(inside.status).toBe(302);
+    expect((await fetchFile(inside)).equals(data)).toBe(true);
+  });
+
+  it("uploads an internet client's file through the app, and redirects LAN clients to storage for it", async () => {
+    const data = Buffer.from("proxied bytes");
+    const created = await createFrom(from(INTERNET), data);
+    const file = created.files[0];
+    expect(file.partUrls).toBeUndefined();
+    expect(memStorage.corsOrigins()).toEqual([]);
+    expect((await patchFrom(from(INTERNET), file.id, data)).status).toBe(204);
+    const token = await finalizeShare(created.id);
+
+    const inside = await downloadFrom(from("10.8.3.4"), token, file.id);
+    expect(inside.status).toBe(302);
+    expect((await fetchFile(inside)).equals(data)).toBe(true);
+    const outside = await downloadFrom(from(INTERNET), token, file.id);
+    expect(outside.status).toBe(200);
+    expect((await fetchFile(outside)).equals(data)).toBe(true);
+  });
+
+  it("decides uploads by the trusted client IP, so a forged X-Forwarded-For can't select direct mode", async () => {
+    const data = Buffer.from("x");
+    const forged = await createFrom(from(INTERNET, { "X-Forwarded-For": LAN }), data);
+    expect(forged.files[0].partUrls).toBeUndefined();
+    // Through the trusted proxy, the address it saw counts, not what the client claimed before it.
+    const viaProxy = await createFrom(from(PROXY, { "X-Forwarded-For": LAN }), data);
+    expect(viaProxy.files[0].partUrls).toHaveLength(1);
+    const forgedViaProxy = await createFrom(from(PROXY, { "X-Forwarded-For": `${LAN}, ${INTERNET}` }), data);
+    expect(forgedViaProxy.files[0].partUrls).toBeUndefined();
+  });
+
+  it("decides downloads by the trusted client IP", async () => {
+    const data = Buffer.from("proxied bytes");
+    const created = await createFrom(from(INTERNET), data);
+    const fileId = created.files[0].id;
+    await patchFrom(from(INTERNET), fileId, data);
+    const token = await finalizeShare(created.id);
+
+    expect((await downloadFrom(from(INTERNET, { "X-Forwarded-For": LAN }), token, fileId)).status).toBe(200);
+    expect((await downloadFrom(from(PROXY, { "X-Forwarded-For": `${LAN}, ${INTERNET}` }), token, fileId)).status).toBe(200);
+    expect((await downloadFrom(from(PROXY, { "X-Forwarded-For": LAN }), token, fileId)).status).toBe(302);
+  });
+
+  it("resumes a direct upload only from a direct network", async () => {
+    const data = Buffer.alloc(MIN_PART_SIZE + 4, 0x42);
+    const created = await createFrom(from(LAN), data);
+    const fileId = created.files[0].id;
+    const status = (peer: string) =>
+      autoHttp.getUpload(new Request(`${origin}/api/uploads/${fileId}`, { headers: from(peer) }), fileId);
+
+    const inside = await status(LAN);
+    expect(inside.status).toBe(200);
+    expect((await inside.json()).partUrls).toHaveLength(2);
+
+    const outside = await status(INTERNET);
+    expect(outside.status).toBe(403);
+    expect((await outside.json()).error).toMatch(/only works from the network it began on/);
+  });
+
+  it("resumes an upload begun through the app from any network", async () => {
+    const data = Buffer.from("proxied bytes");
+    const created = await createFrom(from(INTERNET), data);
+    expect((await patchFrom(from(LAN), created.files[0].id, data)).status).toBe(204);
+    await finalizeShare(created.id);
   });
 });
