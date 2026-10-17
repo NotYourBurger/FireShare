@@ -1,5 +1,6 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
+import type { ExpiryConfig } from "./config";
 import { ShareError, type NewShare, type ShareErrorCode, type ShareService } from "./shares";
 
 const TUS_VERSION = "1.0.0";
@@ -19,11 +20,16 @@ const errorStatus: Record<ShareErrorCode, number> = {
  * Framework-independent request handlers. The Next.js route files only
  * forward to these.
  */
-export function createHttpHandlers({ shares }: { shares: ShareService }) {
+export function createHttpHandlers({ shares, expiry }: { shares: ShareService; expiry: ExpiryConfig }) {
   return {
+    /** Choices for the upload form. */
+    uploadOptions() {
+      return { expiryOptions: expiry.options.map((option) => option.value), expiryDefault: expiry.default };
+    },
+
     /** POST /api/shares — authorizes and creates a `pending` share. */
     async createShare(req: Request) {
-      const newShare = parseNewShare(await req.json().catch(() => null));
+      const newShare = parseNewShare(await req.json().catch(() => null), expiry);
       if (typeof newShare === "string") return json(400, { error: newShare });
       const share = await shares.createShare(newShare);
       return json(201, {
@@ -86,7 +92,7 @@ export function createHttpHandlers({ shares }: { shares: ShareService }) {
       }
     },
 
-    /** Data for the recipient page at /d/:token, or null to show not-found. */
+    /** Data for the recipient page at /d/:token, "expired", or null to show not-found. */
     async viewShare(token: string) {
       return shares.viewShare(token);
     },
@@ -94,12 +100,8 @@ export function createHttpHandlers({ shares }: { shares: ShareService }) {
     /** GET /d/:token/files/:fileId — streams one shared file as an attachment. */
     async download(_req: Request, token: string, fileId: string) {
       const file = await shares.openDownload(token, fileId);
-      if (!file) {
-        return new Response(NOT_FOUND_PAGE, {
-          status: 404,
-          headers: { "Content-Type": "text/html; charset=utf-8", ...SAFE_HEADERS },
-        });
-      }
+      if (file === "expired") return html(410, EXPIRED_PAGE);
+      if (!file) return html(404, NOT_FOUND_PAGE);
       return new Response(Readable.toWeb(file.stream) as ReadableStream, {
         status: 200,
         headers: {
@@ -122,16 +124,31 @@ const SAFE_HEADERS = {
   "Referrer-Policy": "no-referrer",
 };
 
-const NOT_FOUND_PAGE = `<!doctype html>
+const page = (title: string, heading: string, text: string) => `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Link not available · FireShare</title>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title} · FireShare</title>
 <style>body{font:16px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#f6f5f2;color:#1d1b18}main{max-width:28rem;padding:1rem}@media(prefers-color-scheme:dark){body{background:#1a1917;color:#ecebe8}}</style></head>
-<body><main><h1>This link isn't available</h1><p>It may have been mistyped, expired or been deleted.</p></main></body>
+<body><main><h1>${heading}</h1><p>${text}</p></main></body>
 </html>`;
 
+const NOT_FOUND_PAGE = page(
+  "Link not available",
+  "This link isn't available",
+  "It may have been mistyped, expired or been deleted.",
+);
+
+const EXPIRED_PAGE = page(
+  "Link expired",
+  "This link has expired",
+  "The files it shared are no longer available. Ask the sender for a new link.",
+);
+
 /** The validated share, or an error message for the uploader. */
-function parseNewShare(input: unknown): NewShare | string {
+function parseNewShare(input: unknown, expiry: ExpiryConfig): NewShare | string {
   if (!isRecord(input)) return "Invalid request";
+  const expiryValue = input.expiry === undefined ? expiry.default : input.expiry;
+  const expiryOption = expiry.options.find((option) => option.value === expiryValue);
+  if (!expiryOption) return `Expiry must be one of ${expiry.options.map((option) => option.value).join(", ")}`;
   const title = parseText(input.title, MAX_TITLE_LENGTH);
   if (title === undefined) return `Title must be text of at most ${MAX_TITLE_LENGTH} characters`;
   const message = parseText(input.message, MAX_MESSAGE_LENGTH);
@@ -147,7 +164,7 @@ function parseNewShare(input: unknown): NewShare | string {
       typeof type === "string" && MIME_TYPE.test(type) ? type : "application/octet-stream";
     files.push({ name, size, contentType });
   }
-  return { title, message, files };
+  return { title, message, expirySeconds: expiryOption.seconds, files };
 }
 
 /** Optional plain text: trimmed, blank becomes null, undefined when invalid. */
@@ -177,6 +194,13 @@ function checkTusVersion(req: Request): Response | null {
 
 function tus(status: number, headers: Record<string, string> = {}) {
   return new Response(null, { status, headers: { "Tus-Resumable": TUS_VERSION, ...headers } });
+}
+
+function html(status: number, body: string) {
+  return new Response(body, {
+    status,
+    headers: { "Content-Type": "text/html; charset=utf-8", ...SAFE_HEADERS },
+  });
 }
 
 function json(status: number, body: unknown) {

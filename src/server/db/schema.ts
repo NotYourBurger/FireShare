@@ -9,8 +9,12 @@ export const shares = pgTable("shares", {
   /** Sender-supplied plain text, shown to recipients. */
   title: text("title"),
   message: text("message"),
+  /** How long the link works once the share is ready, from the uploader's chosen preset. */
+  expirySeconds: integer("expiry_seconds").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   readyAt: timestamp("ready_at", { withTimezone: true }),
+  /** Set with `readyAt`; from then on the link serves nothing. Never extended. */
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
 });
 
 export const files = pgTable(

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes } from "./format";
+import { formatBytes, formatExpiry } from "./format";
 
 describe("formatBytes", () => {
   it.each([
@@ -15,5 +15,16 @@ describe("formatBytes", () => {
     [5_000_000_000_000_000, "5000 TB"],
   ])("formats %d as %s", (bytes, text) => {
     expect(formatBytes(bytes)).toBe(text);
+  });
+});
+
+describe("formatExpiry", () => {
+  it.each([
+    ["1d", "1 day"],
+    ["7d", "7 days"],
+    ["1h", "1 hour"],
+    ["12h", "12 hours"],
+  ])("formats %s as %s", (value, text) => {
+    expect(formatExpiry(value)).toBe(text);
   });
 });

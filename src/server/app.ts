@@ -28,7 +28,7 @@ async function start(): Promise<HttpHandlers> {
   await retry(() => storage.ensureBucket(), "storage");
 
   const shares = createShareService({ db: db as unknown as Database, storage });
-  return createHttpHandlers({ shares });
+  return createHttpHandlers({ shares, expiry: config.expiry });
 }
 
 /** Storage can take a few seconds longer to accept requests than the app takes to boot. */
