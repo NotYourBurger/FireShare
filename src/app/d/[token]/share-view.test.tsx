@@ -15,6 +15,7 @@ describe("recipient page", () => {
       title: "<script>alert(1)</script>",
       message: '<img src=x onerror="alert(1)">\nsecond line',
       files: [{ id: fileId, name: "a.txt", size: 1 }],
+      downloadAll: true,
     });
     expect(html).not.toContain("<script>");
     expect(html).not.toContain("<img");
@@ -30,6 +31,7 @@ describe("recipient page", () => {
         { id: fileId, name: "../../etc/passwd", size: 1_500_000 },
         { id: "0e9d8c7b-6a5f-4e4d-8c3b-2a1d0c9b8a7f", name: "日本語 <b>.txt", size: 999 },
       ],
+      downloadAll: false,
     });
     expect(html).toContain("Shared files");
     expect(html).toContain("2 files · 1.5 MB");
@@ -39,6 +41,17 @@ describe("recipient page", () => {
     expect(html).toContain("999 bytes");
     expect(html).toContain(`href="/d/${token}/files/${fileId}"`);
     expect(html.match(/>Download</g)).toHaveLength(2);
+  });
+
+  it("offers Download all for a share of several files", () => {
+    const files = [
+      { id: fileId, name: "a.txt", size: 1 },
+      { id: "0e9d8c7b-6a5f-4e4d-8c3b-2a1d0c9b8a7f", name: "b.txt", size: 1 },
+    ];
+    expect(render({ title: null, message: null, files, downloadAll: true })).toContain(`href="/d/${token}/all"`);
+    // Not when some file's CRC32 isn't known, and not for a single file.
+    expect(render({ title: null, message: null, files, downloadAll: false })).not.toContain("/all");
+    expect(render({ title: null, message: null, files: files.slice(0, 1), downloadAll: true })).not.toContain("/all");
   });
 
   it("tells the recipient an expired link's files are gone, without listing them", () => {

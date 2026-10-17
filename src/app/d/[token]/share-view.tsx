@@ -12,6 +12,13 @@ export function ShareView({ token, share }: { token: string; share: SharePage })
         {count} · {formatBytes(total)}
       </p>
       {share.message && <p className="card message">{share.message}</p>}
+      {share.downloadAll && share.files.length > 1 && (
+        <p>
+          <a className="button" href={`/d/${token}/all`}>
+            Download all as zip
+          </a>
+        </p>
+      )}
       <ul className="card files">
         {share.files.map((file) => (
           <li key={file.id}>

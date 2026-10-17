@@ -1,8 +1,8 @@
 import { and, asc, eq, isNull } from "drizzle-orm";
-import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { schema, type Database } from "./db";
-import { chunkHashesFingerprint, verifiedChunk } from "./integrity";
+import { createHash, randomUUID } from "node:crypto";
+import { chunkHashesFingerprint, combineCrc32, verifiedChunk } from "./integrity";
 import {
   MIN_PART_SIZE,
   ObjectChangedError,
@@ -11,6 +11,7 @@ import {
   type UploadedPart,
 } from "./storage/adapter";
 import { generateToken, hashToken } from "./tokens";
+import { createZip, safeFileName, zipEntryNames } from "./zip";
 
 const { shares, files } = schema;
 
@@ -56,6 +57,8 @@ export interface SharePage {
   title: string | null;
   message: string | null;
   files: SharedFile[];
+  /** Whether every file's CRC32 is known, so Download all can be offered. */
+  downloadAll: boolean;
 }
 
 export interface Download {
@@ -74,6 +77,14 @@ export interface Download {
 
 /** What a share token leads to: the share, a share whose link has expired, or nothing. */
 type Lookup<T> = T | "expired" | null;
+
+type FileRow = typeof files.$inferSelect;
+
+/** The file's CRC32 from its chunks', or null for files uploaded before CRC32s were recorded. */
+function fileCrc32(file: FileRow): number | null {
+  if (file.parts.some((part) => typeof part.crc32 !== "number")) return null;
+  return combineCrc32(file.parts);
+}
 
 function tampered(fileId: string, detail: string): ShareError {
   console.error(`Refusing download of file ${fileId}: stored object doesn't match its fingerprint (${detail})`);
@@ -105,6 +116,38 @@ export function createShareService({
       .innerJoin(shares, eq(files.shareId, shares.id))
       .where(and(eq(files.id, fileId), eq(shares.status, "pending")));
     return row?.file ?? null;
+  }
+
+  function filesOf(shareId: string) {
+    return db.query.files.findMany({ where: eq(files.shareId, shareId), orderBy: asc(files.position) });
+  }
+
+  /**
+   * The ETag the file's stored object must still have, or null when the
+   * object is missing. Throws a `tampered` ShareError, and logs it, when the
+   * object's size or ETag no longer matches the fingerprint recorded at finalize.
+   */
+  async function checkFingerprint(file: FileRow): Promise<string | null> {
+    const stored = await storage.head(file.storageKey);
+    if (!stored) return null;
+    if (stored.size !== file.size) {
+      throw tampered(file.id, `size ${stored.size}, expected ${file.size}`);
+    }
+    // Files completed before fingerprints were recorded can only be checked by size.
+    if (file.fingerprintEtag !== null && stored.etag !== file.fingerprintEtag) {
+      throw tampered(file.id, `ETag ${stored.etag}, expected ${file.fingerprintEtag}`);
+    }
+    return stored.etag;
+  }
+
+  /** Reads the object whose ETag was checked; ifMatch closes the gap between the check and the read. */
+  async function readChecked(file: FileRow, etag: string, range?: ByteRange) {
+    try {
+      return await storage.getReadStream(file.storageKey, { range, ifMatch: etag });
+    } catch (err) {
+      if (err instanceof ObjectChangedError) throw tampered(file.id, "ETag changed while opening");
+      throw err;
+    }
   }
 
   return {
@@ -188,10 +231,7 @@ export function createShareService({
         : undefined;
       if (!share) throw new ShareError("not_found", "No such pending share");
 
-      const shareFiles = await db.query.files.findMany({
-        where: eq(files.shareId, shareId),
-        orderBy: asc(files.position),
-      });
+      const shareFiles = await filesOf(shareId);
       if (shareFiles.length === 0 || shareFiles.some((file) => file.uploadOffset !== file.size)) {
         throw new ShareError("not_finalizable", "Not every file has finished uploading");
       }
@@ -233,12 +273,13 @@ export function createShareService({
     async viewShare(token: string): Promise<Lookup<SharePage>> {
       const share = await findReadyShare(token);
       if (!share || share === "expired") return share;
-      const shareFiles = await db
-        .select({ id: files.id, name: files.name, size: files.size })
-        .from(files)
-        .where(eq(files.shareId, share.id))
-        .orderBy(asc(files.position));
-      return { title: share.title, message: share.message, files: shareFiles };
+      const shareFiles = await filesOf(share.id);
+      return {
+        title: share.title,
+        message: share.message,
+        files: shareFiles.map(({ id, name, size }) => ({ id, name, size })),
+        downloadAll: shareFiles.every((file) => fileCrc32(file) !== null),
+      };
     },
 
     /**
@@ -255,30 +296,47 @@ export function createShareService({
         where: and(eq(files.id, fileId), eq(files.shareId, share.id)),
       });
       if (!file) return null;
-      const stored = await storage.head(file.storageKey);
+      const etag = await checkFingerprint(file);
       // A missing object must look exactly like an unknown token.
-      if (!stored) return null;
-      if (stored.size !== file.size) {
-        throw tampered(file.id, `size ${stored.size}, expected ${file.size}`);
-      }
-      // Files completed before fingerprints were recorded can only be checked by size.
-      if (file.fingerprintEtag !== null && stored.etag !== file.fingerprintEtag) {
-        throw tampered(file.id, `ETag ${stored.etag}, expected ${file.fingerprintEtag}`);
-      }
+      if (!etag) return null;
       return {
         name: file.name,
         size: file.size,
         contentType: file.contentType,
         etag: `"${file.fingerprintHash ?? file.id}"`,
-        async read(range) {
-          try {
-            // ifMatch closes the gap between the check above and the read.
-            return await storage.getReadStream(file.storageKey, { range, ifMatch: stored.etag });
-          } catch (err) {
-            if (err instanceof ObjectChangedError) throw tampered(file.id, "ETag changed while opening");
-            throw err;
-          }
-        },
+        read: (range) => readChecked(file, etag, range),
+      };
+    },
+
+    /**
+     * The whole share as one store-only ZIP64, like {@link openDownload} for a
+     * file: "expired", or null for anything not downloadable, including a
+     * share with a file whose CRC32 isn't known. Every file's fingerprint is
+     * checked before any bytes are served, and each read is guarded again.
+     */
+    async openArchive(token: string): Promise<Lookup<Download>> {
+      const share = await findReadyShare(token);
+      if (!share || share === "expired") return share;
+      const shareFiles = await filesOf(share.id);
+      const crcs = shareFiles.map(fileCrc32);
+      if (crcs.some((crc) => crc === null)) return null;
+      const etags = await Promise.all(shareFiles.map(checkFingerprint));
+      if (etags.some((etag) => etag === null)) return null;
+
+      const names = zipEntryNames(shareFiles.map((file) => file.name));
+      const entries = shareFiles.map((file, i) => ({ name: names[i], size: file.size, crc32: crcs[i]! }));
+      const modified = share.readyAt ?? share.createdAt;
+      const zip = createZip(entries, modified, (i, range) => readChecked(shareFiles[i], etags[i]!, range));
+      // The archive's bytes follow from exactly these inputs.
+      const version = createHash("sha256")
+        .update(JSON.stringify([entries, shareFiles.map((file) => file.fingerprintHash ?? file.id), modified]))
+        .digest("hex");
+      return {
+        name: `${share.title ? safeFileName(share.title) : "Shared files"}.zip`,
+        size: zip.size,
+        contentType: "application/zip",
+        etag: `"${version}"`,
+        read: async (range) => zip.read(range),
       };
     },
   };
