@@ -3,7 +3,7 @@ import { buffer } from "node:stream/consumers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { schema, type Database } from "./db";
 import { createTestDb } from "./db/test-db";
-import { createShareService, ShareError, type ShareService } from "./shares";
+import { createShareService, ShareError, type NewFile, type NewShare, type ShareService } from "./shares";
 import { MIN_PART_SIZE } from "./storage/adapter";
 import type { StorageAdapter } from "./storage/adapter";
 import { createMemoryStorage } from "./storage/memory";
@@ -21,23 +21,34 @@ beforeEach(async () => {
 
 const body = (data: Buffer | string) => Readable.from([Buffer.from(data)]);
 
+const withFiles = (files: NewFile[]): NewShare => ({ title: null, message: null, files });
+
+const file = (name: string, size: number): NewFile => ({ name, size, contentType: "text/plain" });
+
+/** Uploads each file's whole content in one chunk. */
+async function uploadAll(share: { files: { id: string }[] }, contents: string[]) {
+  for (const [i, content] of contents.entries()) {
+    await service.writeChunk(share.files[i].id, 0, body(content), Buffer.byteLength(content));
+  }
+}
+
 describe("share service", () => {
   it("serves an uploaded file through the share token after finalize", async () => {
-    const share = await service.createShare([
+    const share = await service.createShare(withFiles([
       { name: "render.exr", size: 11, contentType: "image/x-exr" },
-    ]);
+    ]));
     const [file] = share.files;
 
     expect(await service.writeChunk(file.id, 0, body("hello world"), 11)).toBe(11);
     const { token } = await service.finalize(share.id);
 
-    const download = await service.openDownload(token);
+    const download = await service.openDownload(token, file.id);
     expect(download).toMatchObject({ name: "render.exr", size: 11, contentType: "image/x-exr" });
     expect((await buffer(download!.stream)).toString()).toBe("hello world");
   });
 
   it("returns nothing for an unknown token", async () => {
-    expect(await service.openDownload(generateToken())).toBeNull();
+    expect(await service.openDownload(generateToken(), crypto.randomUUID())).toBeNull();
   });
 
   it("stores files under random server-chosen keys, never the client filename", async () => {
@@ -45,8 +56,8 @@ describe("share service", () => {
     const createUpload = storage.createUpload;
     storage.createUpload = (key, type) => (keys.push(key), createUpload(key, type));
 
-    await service.createShare([{ name: "../../etc/passwd", size: 1, contentType: "text/plain" }]);
-    await service.createShare([{ name: "../../etc/passwd", size: 1, contentType: "text/plain" }]);
+    await service.createShare(withFiles([{ name: "../../etc/passwd", size: 1, contentType: "text/plain" }]));
+    await service.createShare(withFiles([{ name: "../../etc/passwd", size: 1, contentType: "text/plain" }]));
 
     expect(keys).toHaveLength(2);
     expect(keys[0]).not.toBe(keys[1]);
@@ -57,16 +68,16 @@ describe("share service", () => {
     const keys: string[] = [];
     const createUpload = storage.createUpload;
     storage.createUpload = (key, type) => (keys.push(key), createUpload(key, type));
-    const share = await service.createShare([{ name: "a.txt", size: 1, contentType: "text/plain" }]);
+    const share = await service.createShare(withFiles([{ name: "a.txt", size: 1, contentType: "text/plain" }]));
     await service.writeChunk(share.files[0].id, 0, body("a"), 1);
     const { token } = await service.finalize(share.id);
 
     await storage.delete(keys[0]);
-    expect(await service.openDownload(token)).toBeNull();
+    expect(await service.openDownload(token, share.files[0].id)).toBeNull();
   });
 
   it("stores only a hash of the share token", async () => {
-    const share = await service.createShare([{ name: "a.txt", size: 1, contentType: "text/plain" }]);
+    const share = await service.createShare(withFiles([{ name: "a.txt", size: 1, contentType: "text/plain" }]));
     await service.writeChunk(share.files[0].id, 0, body("a"), 1);
     const { token } = await service.finalize(share.id);
 
@@ -79,7 +90,7 @@ describe("share service", () => {
     const big = Buffer.alloc(MIN_PART_SIZE + 3, 7);
 
     async function pendingFile(size: number) {
-      const share = await service.createShare([{ name: "big.bin", size, contentType: "application/octet-stream" }]);
+      const share = await service.createShare(withFiles([{ name: "big.bin", size, contentType: "application/octet-stream" }]));
       return { shareId: share.id, fileId: share.files[0].id };
     }
 
@@ -92,7 +103,7 @@ describe("share service", () => {
 
       await service.writeChunk(fileId, MIN_PART_SIZE, body(big.subarray(MIN_PART_SIZE)), 3);
       const { token } = await service.finalize(shareId);
-      const download = await service.openDownload(token);
+      const download = await service.openDownload(token, fileId);
       expect((await buffer(download!.stream)).equals(big)).toBe(true);
     });
 
@@ -132,7 +143,7 @@ describe("share service", () => {
 
   describe("finalize", () => {
     it("refuses a share whose files haven't fully arrived, leaving it pending", async () => {
-      const share = await service.createShare([{ name: "a.txt", size: 2, contentType: "text/plain" }]);
+      const share = await service.createShare(withFiles([{ name: "a.txt", size: 2, contentType: "text/plain" }]));
       await expect(service.finalize(share.id)).rejects.toThrow(
         expect.objectContaining({ code: "not_finalizable" }),
       );
@@ -140,7 +151,7 @@ describe("share service", () => {
     });
 
     it("issues the share token only once", async () => {
-      const share = await service.createShare([{ name: "a.txt", size: 1, contentType: "text/plain" }]);
+      const share = await service.createShare(withFiles([{ name: "a.txt", size: 1, contentType: "text/plain" }]));
       await service.writeChunk(share.files[0].id, 0, body("a"), 1);
       await service.finalize(share.id);
 
@@ -150,7 +161,7 @@ describe("share service", () => {
     });
 
     it("accepts no more chunks once the share is ready", async () => {
-      const share = await service.createShare([{ name: "a.txt", size: 1, contentType: "text/plain" }]);
+      const share = await service.createShare(withFiles([{ name: "a.txt", size: 1, contentType: "text/plain" }]));
       await service.writeChunk(share.files[0].id, 0, body("a"), 1);
       await service.finalize(share.id);
 
@@ -167,12 +178,112 @@ describe("share service", () => {
     });
 
     it("shares an empty file", async () => {
-      const share = await service.createShare([{ name: "empty.txt", size: 0, contentType: "text/plain" }]);
+      const share = await service.createShare(withFiles([{ name: "empty.txt", size: 0, contentType: "text/plain" }]));
       const { token } = await service.finalize(share.id);
 
-      const download = await service.openDownload(token);
+      const download = await service.openDownload(token, share.files[0].id);
       expect(download).toMatchObject({ name: "empty.txt", size: 0 });
       expect(await buffer(download!.stream)).toHaveLength(0);
+    });
+  });
+
+  describe("multi-file shares", () => {
+    it("serves every file of one share through its single token, in the uploader's order", async () => {
+      const message = "Shot 12, v3.\nCall me if anything's off.";
+      const share = await service.createShare({
+        title: "Final renders",
+        message,
+        files: [file("b.txt", 2), file("a.txt", 3), file("c.txt", 0)],
+      });
+      expect(share.files.map((f) => f.name)).toEqual(["b.txt", "a.txt", "c.txt"]);
+      await uploadAll(share, ["bb", "aaa", ""]);
+      const { token } = await service.finalize(share.id);
+
+      expect(await service.viewShare(token)).toEqual({
+        title: "Final renders",
+        message,
+        files: share.files,
+      });
+      for (const [i, content] of ["bb", "aaa", ""].entries()) {
+        const download = await service.openDownload(token, share.files[i].id);
+        expect((await buffer(download!.stream)).toString()).toBe(content);
+      }
+      expect(await db.select().from(schema.shares)).toHaveLength(1);
+    });
+
+    it("stays pending, with no link, until every file has arrived", async () => {
+      const share = await service.createShare(withFiles([file("a.txt", 1), file("b.txt", 1)]));
+      await uploadAll(share, ["a"]);
+
+      await expect(service.finalize(share.id)).rejects.toThrow(
+        expect.objectContaining({ code: "not_finalizable" }),
+      );
+      const [row] = await db.select().from(schema.shares);
+      expect(row).toMatchObject({ status: "pending", tokenHash: null });
+      expect(await service.getUpload(share.files[1].id)).toEqual({ size: 1, offset: 0 });
+    });
+
+    it("never becomes ready when one file fails to complete, and can be finalized again later", async () => {
+      const share = await service.createShare(withFiles([file("a.txt", 1), file("b.txt", 1)]));
+      await uploadAll(share, ["a", "b"]);
+      const completeUpload = storage.completeUpload;
+      let calls = 0;
+      storage.completeUpload = async (...args) => {
+        if (++calls === 2) throw new Error("storage unavailable");
+        return completeUpload(...args);
+      };
+
+      await expect(service.finalize(share.id)).rejects.toThrow("storage unavailable");
+      const [row] = await db.select().from(schema.shares);
+      expect(row).toMatchObject({ status: "pending", tokenHash: null });
+
+      // The first file is already assembled; a retry completes only the rest.
+      const { token } = await service.finalize(share.id);
+      expect(calls).toBe(3);
+      const download = await service.openDownload(token, share.files[1].id);
+      expect((await buffer(download!.stream)).toString()).toBe("b");
+    });
+
+    it("creates nothing when storage fails partway through creating the share", async () => {
+      const createUpload = storage.createUpload;
+      let calls = 0;
+      storage.createUpload = async (...args) => {
+        if (++calls === 2) throw new Error("storage unavailable");
+        return createUpload(...args);
+      };
+
+      await expect(service.createShare(withFiles([file("a.txt", 1), file("b.txt", 1)]))).rejects.toThrow();
+      expect(await db.select().from(schema.shares)).toHaveLength(0);
+      expect(await db.select().from(schema.files)).toHaveLength(0);
+    });
+
+    it("accepts no more bytes for any file once the share is ready", async () => {
+      const share = await service.createShare(withFiles([file("a.txt", 1), file("b.txt", 1)]));
+      await uploadAll(share, ["a", "b"]);
+      await service.finalize(share.id);
+
+      for (const { id } of share.files) {
+        expect(await service.getUpload(id)).toBeNull();
+        await expect(service.writeChunk(id, 1, body(""), 0)).rejects.toThrow(
+          expect.objectContaining({ code: "not_found" }),
+        );
+      }
+    });
+
+    it("doesn't serve another share's file through a token", async () => {
+      const first = await service.createShare(withFiles([file("a.txt", 1)]));
+      const second = await service.createShare(withFiles([file("secret.txt", 1)]));
+      await uploadAll(first, ["a"]);
+      await uploadAll(second, ["s"]);
+      const { token } = await service.finalize(first.id);
+      await service.finalize(second.id);
+
+      expect(await service.openDownload(token, second.files[0].id)).toBeNull();
+      expect(await service.openDownload(token, "not-a-uuid")).toBeNull();
+    });
+
+    it("shows nothing for an unknown token", async () => {
+      expect(await service.viewShare(generateToken())).toBeNull();
     });
   });
 });

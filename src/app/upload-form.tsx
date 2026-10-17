@@ -2,8 +2,13 @@
 
 import { useState } from "react";
 import { Upload } from "tus-js-client";
+import { formatBytes } from "./format";
 
 const CHUNK_SIZE = 64 * 1024 * 1024;
+const PARALLEL_UPLOADS = 3;
+// Keep in step with MAX_TITLE_LENGTH and MAX_MESSAGE_LENGTH in src/server/http.ts.
+const MAX_TITLE_LENGTH = 200;
+const MAX_MESSAGE_LENGTH = 5000;
 
 type State =
   | { step: "select" }
@@ -12,18 +17,28 @@ type State =
   | { step: "failed"; message: string };
 
 export function UploadForm() {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [title, setTitle] = useState("");
+  const [message, setMessage] = useState("");
   const [state, setState] = useState<State>({ step: "select" });
 
   async function share() {
-    if (!file) return;
+    if (files.length === 0) return;
     setState({ step: "uploading", progress: 0 });
     try {
       const created = await postJson("/api/shares", {
-        files: [{ name: file.name, size: file.size, type: file.type }],
+        title,
+        message,
+        files: files.map((file) => ({ name: file.name, size: file.size, type: file.type })),
       });
-      await upload(file, new URL(created.files[0].uploadUrl, location.href).href, (progress) =>
-        setState({ step: "uploading", progress }),
+      const total = files.reduce((sum, file) => sum + file.size, 0);
+      const sent = files.map(() => 0);
+      await inParallel(files, PARALLEL_UPLOADS, (file, i) =>
+        upload(file, new URL(created.files[i].uploadUrl, location.href).href, (bytes) => {
+          sent[i] = bytes;
+          const done = sent.reduce((sum, n) => sum + n, 0);
+          setState({ step: "uploading", progress: total ? done / total : 1 });
+        }),
       );
       const { path } = await postJson(`/api/shares/${created.id}/finalize`);
       setState({ step: "done", url: new URL(path, location.href).href });
@@ -42,11 +57,13 @@ export function UploadForm() {
         </div>
         <button
           onClick={() => {
-            setFile(null);
+            setFiles([]);
+            setTitle("");
+            setMessage("");
             setState({ step: "select" });
           }}
         >
-          Share another file
+          Share more files
         </button>
       </div>
     );
@@ -57,10 +74,58 @@ export function UploadForm() {
     <div className="card">
       <input
         type="file"
+        multiple
         disabled={uploading}
-        onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-        aria-label="File to share"
+        onChange={(e) => {
+          const picked = Array.from(e.target.files ?? []);
+          setFiles((current) => [...current, ...picked]);
+          e.target.value = "";
+        }}
+        aria-label="Files to share"
       />
+      {files.length > 0 && (
+        <ul className="files">
+          {files.map((file, i) => (
+            <li key={i}>
+              <div className="file-info">
+                <span className="file-name">{file.name}</span>
+                <span className="muted">{formatBytes(file.size)}</span>
+              </div>
+              <button
+                className="secondary"
+                disabled={uploading}
+                onClick={() => setFiles((current) => current.filter((_, j) => j !== i))}
+                aria-label={`Remove ${file.name}`}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <label className="field">
+        <span>
+          Title <span className="muted">(optional)</span>
+        </span>
+        <input
+          value={title}
+          maxLength={MAX_TITLE_LENGTH}
+          disabled={uploading}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+      </label>
+      <label className="field">
+        <span>
+          Message <span className="muted">(optional)</span>
+        </span>
+        <textarea
+          value={message}
+          rows={3}
+          maxLength={MAX_MESSAGE_LENGTH}
+          disabled={uploading}
+          onChange={(e) => setMessage(e.target.value)}
+        />
+      </label>
       {uploading && (
         <div>
           <progress value={state.progress} max={1} />
@@ -68,21 +133,33 @@ export function UploadForm() {
         </div>
       )}
       {state.step === "failed" && <p className="error">Upload failed: {state.message}</p>}
-      <button disabled={!file || uploading} onClick={share}>
+      <button disabled={files.length === 0 || uploading} onClick={share}>
         {uploading ? "Uploading…" : "Upload and get link"}
       </button>
     </div>
   );
 }
 
-function upload(file: File, uploadUrl: string, onProgress: (fraction: number) => void) {
+/** Runs `task` over `items` with at most `limit` running at once; stops at the first failure. */
+async function inParallel<T>(items: T[], limit: number, task: (item: T, index: number) => Promise<void>) {
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      await task(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+function upload(file: File, uploadUrl: string, onProgress: (bytesSent: number) => void) {
   return new Promise<void>((resolve, reject) => {
     new Upload(file, {
       uploadUrl,
       chunkSize: CHUNK_SIZE,
       retryDelays: [0, 1000, 3000, 5000],
       storeFingerprintForResuming: false,
-      onProgress: (sent, total) => onProgress(total ? sent / total : 1),
+      onProgress: (sent) => onProgress(sent),
       onSuccess: () => resolve(),
       onError: reject,
     }).start();

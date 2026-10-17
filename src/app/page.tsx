@@ -4,7 +4,7 @@ export default function Home() {
   return (
     <main>
       <h1>FireShare</h1>
-      <p className="tagline">Upload a file and get a link to share it.</p>
+      <p className="tagline">Upload files and get one link to share them.</p>
       <UploadForm />
     </main>
   );

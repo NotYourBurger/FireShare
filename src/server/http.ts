@@ -1,9 +1,11 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
-import { ShareError, type ShareErrorCode, type ShareService } from "./shares";
+import { ShareError, type NewShare, type ShareErrorCode, type ShareService } from "./shares";
 
 const TUS_VERSION = "1.0.0";
 const MAX_NAME_LENGTH = 255;
+export const MAX_TITLE_LENGTH = 200;
+export const MAX_MESSAGE_LENGTH = 5000;
 const MIME_TYPE = /^[\w.+-]+\/[\w.+-]+$/;
 
 const errorStatus: Record<ShareErrorCode, number> = {
@@ -21,9 +23,9 @@ export function createHttpHandlers({ shares }: { shares: ShareService }) {
   return {
     /** POST /api/shares — authorizes and creates a `pending` share. */
     async createShare(req: Request) {
-      const files = parseNewFiles(await req.json().catch(() => null));
-      if (!files) return json(400, { error: "Invalid files" });
-      const share = await shares.createShare(files);
+      const newShare = parseNewShare(await req.json().catch(() => null));
+      if (typeof newShare === "string") return json(400, { error: newShare });
+      const share = await shares.createShare(newShare);
       return json(201, {
         id: share.id,
         files: share.files.map((file) => ({ ...file, uploadUrl: `/api/uploads/${file.id}` })),
@@ -84,9 +86,14 @@ export function createHttpHandlers({ shares }: { shares: ShareService }) {
       }
     },
 
-    /** GET /d/:token — streams the shared file as an attachment. */
-    async download(_req: Request, token: string) {
-      const file = await shares.openDownload(token);
+    /** Data for the recipient page at /d/:token, or null to show not-found. */
+    async viewShare(token: string) {
+      return shares.viewShare(token);
+    },
+
+    /** GET /d/:token/files/:fileId — streams one shared file as an attachment. */
+    async download(_req: Request, token: string, fileId: string) {
+      const file = await shares.openDownload(token, fileId);
       if (!file) {
         return new Response(NOT_FOUND_PAGE, {
           status: 404,
@@ -122,20 +129,34 @@ const NOT_FOUND_PAGE = `<!doctype html>
 <body><main><h1>This link isn't available</h1><p>It may have been mistyped, expired or been deleted.</p></main></body>
 </html>`;
 
-function parseNewFiles(input: unknown) {
-  // One file per share until multi-file shares land.
-  if (!isRecord(input) || !Array.isArray(input.files) || input.files.length !== 1) return null;
+/** The validated share, or an error message for the uploader. */
+function parseNewShare(input: unknown): NewShare | string {
+  if (!isRecord(input)) return "Invalid request";
+  const title = parseText(input.title, MAX_TITLE_LENGTH);
+  if (title === undefined) return `Title must be text of at most ${MAX_TITLE_LENGTH} characters`;
+  const message = parseText(input.message, MAX_MESSAGE_LENGTH);
+  if (message === undefined) return `Message must be text of at most ${MAX_MESSAGE_LENGTH} characters`;
+  if (!Array.isArray(input.files) || input.files.length === 0) return "Invalid files";
   const files = [];
   for (const file of input.files as unknown[]) {
-    if (!isRecord(file)) return null;
+    if (!isRecord(file)) return "Invalid files";
     const { name, size, type } = file;
-    if (typeof name !== "string" || name.length === 0 || name.length > MAX_NAME_LENGTH) return null;
-    if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) return null;
+    if (typeof name !== "string" || name.length === 0 || name.length > MAX_NAME_LENGTH) return "Invalid files";
+    if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) return "Invalid files";
     const contentType =
       typeof type === "string" && MIME_TYPE.test(type) ? type : "application/octet-stream";
     files.push({ name, size, contentType });
   }
-  return files;
+  return { title, message, files };
+}
+
+/** Optional plain text: trimmed, blank becomes null, undefined when invalid. */
+function parseText(value: unknown, maxLength: number): string | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (text.length > maxLength) return undefined;
+  return text || null;
 }
 
 /** `attachment` with an ASCII fallback name plus the exact UTF-8 name (RFC 6266). */

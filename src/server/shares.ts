@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { schema, type Database } from "./db";
@@ -25,6 +25,24 @@ export interface NewFile {
   contentType: string;
 }
 
+export interface NewShare {
+  title: string | null;
+  message: string | null;
+  files: NewFile[];
+}
+
+export interface SharedFile {
+  id: string;
+  name: string;
+  size: number;
+}
+
+export interface SharePage {
+  title: string | null;
+  message: string | null;
+  files: SharedFile[];
+}
+
 export interface Download {
   name: string;
   size: number;
@@ -33,6 +51,12 @@ export interface Download {
 }
 
 export function createShareService({ db, storage }: { db: Database; storage: StorageAdapter }) {
+  async function findReadyShare(token: string) {
+    return db.query.shares.findFirst({
+      where: and(eq(shares.tokenHash, hashToken(token)), eq(shares.status, "ready")),
+    });
+  }
+
   async function findPendingFile(fileId: string) {
     if (!isUuid(fileId)) return null;
     const [row] = await db
@@ -44,20 +68,27 @@ export function createShareService({ db, storage }: { db: Database; storage: Sto
   }
 
   return {
-    /** Creates a `pending` share with a random storage key for each file. */
-    async createShare(newFiles: NewFile[]) {
-      const [share] = await db.insert(shares).values({}).returning({ id: shares.id });
-      const created = [];
+    /**
+     * Creates a `pending` share with a random storage key for each file. The
+     * share and all its files appear together or not at all; files can never
+     * be added to it afterwards.
+     */
+    async createShare({ title, message, files: newFiles }: NewShare) {
+      const uploads: { storageKey: string; multipartUploadId: string }[] = [];
       for (const file of newFiles) {
         const storageKey = randomUUID();
         const { uploadId } = await storage.createUpload(storageKey, file.contentType);
-        const [row] = await db
-          .insert(files)
-          .values({ ...file, shareId: share.id, storageKey, multipartUploadId: uploadId })
-          .returning({ id: files.id, name: files.name, size: files.size });
-        created.push(row);
+        uploads.push({ storageKey, multipartUploadId: uploadId });
       }
-      return { id: share.id, files: created };
+      return db.transaction(async (tx) => {
+        const [share] = await tx.insert(shares).values({ title, message }).returning({ id: shares.id });
+        const created = await tx
+          .insert(files)
+          .values(newFiles.map((file, i) => ({ ...file, ...uploads[i], shareId: share.id, position: i })))
+          .returning({ id: files.id, name: files.name, size: files.size, position: files.position });
+        created.sort((a, b) => a.position - b.position);
+        return { id: share.id, files: created.map(({ position: _, ...file }) => file) };
+      });
     },
 
     /** Upload progress of a file in a `pending` share, or null. */
@@ -101,7 +132,11 @@ export function createShareService({ db, storage }: { db: Database; storage: Sto
       return newOffset;
     },
 
-    /** Completes every file and marks the share `ready`; returns the share token once. */
+    /**
+     * Completes every file and marks the share `ready`; returns the share token
+     * once. If any file can't be completed the share stays `pending`, and a
+     * later call picks up where this one stopped.
+     */
     async finalize(shareId: string) {
       const share = isUuid(shareId)
         ? await db.query.shares.findFirst({
@@ -110,17 +145,25 @@ export function createShareService({ db, storage }: { db: Database; storage: Sto
         : undefined;
       if (!share) throw new ShareError("not_found", "No such pending share");
 
-      const shareFiles = await db.query.files.findMany({ where: eq(files.shareId, shareId) });
-      if (shareFiles.some((file) => file.uploadOffset !== file.size)) {
+      const shareFiles = await db.query.files.findMany({
+        where: eq(files.shareId, shareId),
+        orderBy: asc(files.position),
+      });
+      if (shareFiles.length === 0 || shareFiles.some((file) => file.uploadOffset !== file.size)) {
         throw new ShareError("not_finalizable", "Not every file has finished uploading");
       }
       for (const file of shareFiles) {
+        if (file.completedAt) continue;
         let parts = file.parts;
         if (file.size === 0) {
           // A multipart upload needs at least one part, even an empty one.
           parts = [await storage.writePart(file.storageKey, file.multipartUploadId, 1, Readable.from([]), 0)];
         }
         await storage.completeUpload(file.storageKey, file.multipartUploadId, parts);
+        await db
+          .update(files)
+          .set({ completedAt: new Date() })
+          .where(and(eq(files.id, file.id), isNull(files.completedAt)));
       }
 
       const token = generateToken();
@@ -133,13 +176,26 @@ export function createShareService({ db, storage }: { db: Database; storage: Sto
       return { token };
     },
 
-    /** Resolves a share token to its file, or null for anything not downloadable. */
-    async openDownload(token: string): Promise<Download | null> {
-      const share = await db.query.shares.findFirst({
-        where: and(eq(shares.tokenHash, hashToken(token)), eq(shares.status, "ready")),
-      });
+    /** What a recipient sees for a share token, or null for anything not viewable. */
+    async viewShare(token: string): Promise<SharePage | null> {
+      const share = await findReadyShare(token);
       if (!share) return null;
-      const file = await db.query.files.findFirst({ where: eq(files.shareId, share.id) });
+      const shareFiles = await db
+        .select({ id: files.id, name: files.name, size: files.size })
+        .from(files)
+        .where(eq(files.shareId, share.id))
+        .orderBy(asc(files.position));
+      return { title: share.title, message: share.message, files: shareFiles };
+    },
+
+    /** Resolves a share token and one of its files, or null for anything not downloadable. */
+    async openDownload(token: string, fileId: string): Promise<Download | null> {
+      if (!isUuid(fileId)) return null;
+      const share = await findReadyShare(token);
+      if (!share) return null;
+      const file = await db.query.files.findFirst({
+        where: and(eq(files.id, fileId), eq(files.shareId, share.id)),
+      });
       // A missing object must look exactly like an unknown token.
       if (!file || !(await storage.head(file.storageKey))) return null;
       return {
