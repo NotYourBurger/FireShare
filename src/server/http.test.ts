@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { loadExpiryConfig, loadUploadConfig } from "./config";
+import { loadAccessConfig, loadExpiryConfig, loadUploadConfig } from "./config";
 import { createTestDb } from "./db/test-db";
 import { createHttpHandlers, MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, parseRange, type HttpHandlers } from "./http";
 import { createShareService } from "./shares";
@@ -9,6 +9,7 @@ import { createMemoryStorage } from "./storage/memory";
 import { MIN_PART_SIZE, type StorageAdapter } from "./storage/adapter";
 import { unzip } from "./test-unzip";
 import { generateToken } from "./tokens";
+import { createUploadAccess } from "./upload-access";
 
 let http: HttpHandlers;
 let storage: StorageAdapter;
@@ -26,6 +27,7 @@ beforeEach(async () => {
     shares,
     expiry: loadExpiryConfig({ EXPIRY_OPTIONS: "12h,1d,7d", EXPIRY_DEFAULT: "1d" }),
     upload: loadUploadConfig({ UPLOAD_CHUNK_SIZE: "8MB", UPLOAD_PARALLEL_FILES: "2" }),
+    access: createUploadAccess(loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: "abuse@example.com" })),
   });
 });
 

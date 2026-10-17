@@ -2,11 +2,12 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import path from "node:path";
 import { Pool } from "pg";
-import { loadConfig } from "./config";
+import { loadAccessConfig, loadConfig } from "./config";
 import { schema, type Database } from "./db";
 import { createHttpHandlers, type HttpHandlers } from "./http";
 import { createShareService } from "./shares";
 import { createS3Storage } from "./storage/s3";
+import { createUploadAccess } from "./upload-access";
 
 let app: Promise<HttpHandlers> | undefined;
 
@@ -28,7 +29,12 @@ async function start(): Promise<HttpHandlers> {
   await retry(() => storage.ensureBucket(), "storage");
 
   const shares = createShareService({ db: db as unknown as Database, storage });
-  return createHttpHandlers({ shares, expiry: config.expiry, upload: config.upload });
+  return createHttpHandlers({
+    shares,
+    expiry: config.expiry,
+    upload: config.upload,
+    access: createUploadAccess(loadAccessConfig()),
+  });
 }
 
 /** Storage can take a few seconds longer to accept requests than the app takes to boot. */

@@ -2,7 +2,16 @@ import { formatBytes } from "@/app/format";
 import type { SharePage } from "@/server/shares";
 
 /** The recipient page. Everything the sender wrote is rendered as plain text. */
-export function ShareView({ token, share }: { token: string; share: SharePage }) {
+export function ShareView({
+  token,
+  share,
+  children,
+}: {
+  token: string;
+  share: SharePage;
+  /** Shown below the files. */
+  children?: React.ReactNode;
+}) {
   const total = share.files.reduce((sum, file) => sum + file.size, 0);
   const count = share.files.length === 1 ? "1 file" : `${share.files.length} files`;
   return (
@@ -36,6 +45,7 @@ export function ShareView({ token, share }: { token: string; share: SharePage })
           </li>
         ))}
       </ul>
+      {children}
     </main>
   );
 }

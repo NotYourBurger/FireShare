@@ -230,3 +230,9 @@ button.danger {
   margin: 0.75rem 0 0;
   font-size: 0.875rem;
 }
+
+.abuse {
+  margin: 1rem 0 0;
+  font-size: 0.875rem;
+  text-align: center;
+}
