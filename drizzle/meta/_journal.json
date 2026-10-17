@@ -50,6 +50,13 @@
       "when": 1792242020007,
       "tag": "0006_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792254454490,
+      "tag": "0007_background_crc32",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "files" ADD COLUMN "crc32" bigint;

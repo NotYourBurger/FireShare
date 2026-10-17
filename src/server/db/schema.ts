@@ -70,6 +70,13 @@ export const files = pgTable(
      */
     fingerprintHash: text("fingerprint_hash"),
     fingerprintEtag: text("fingerprint_etag"),
+    /**
+     * The whole file's CRC32, which Download all needs to lay out a resumable
+     * zip. Combined from the chunks' at finalize in proxied mode; computed by
+     * the cleanup worker, which reads the object once, in direct mode. Null
+     * until then.
+     */
+    crc32: bigint("crc32", { mode: "number" }),
     /** When the cleanup worker deleted the stored object, after the share expired or was deleted. */
     removedAt: timestamp("removed_at", { withTimezone: true }),
   },

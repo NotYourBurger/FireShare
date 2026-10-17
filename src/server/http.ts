@@ -351,12 +351,14 @@ const ACCESS_ERROR = {
 
 async function serveFile(req: Request, file: ArchiveDownload) {
   if (file.size === null || file.etag === null) {
+    // Its layout depends on bytes not yet read, so a resume couldn't land in the same place.
     const stream = Readable.toWeb(await file.read()) as ReadableStream;
     return new Response(stream, {
       status: 200,
       headers: {
         "Content-Type": file.contentType,
         "Content-Disposition": contentDisposition(file.name),
+        "Accept-Ranges": "none",
         ...SAFE_HEADERS,
       },
     });

@@ -135,11 +135,16 @@ const QUOTA_WINDOW_SECONDS = 86400;
 type ShareRow = typeof shares.$inferSelect;
 type FileRow = typeof files.$inferSelect;
 
-/** The file's CRC32 from its chunks', or null for files without per-chunk CRC32s. */
+/** The file's CRC32, or null until the cleanup worker has computed it for a direct-mode file. */
 function fileCrc32(file: FileRow): number | null {
-  if (file.size > 0 && file.parts.length === 0) return null;
-  if (file.parts.some((part) => typeof part.crc32 !== "number")) return null;
-  return combineCrc32(file.parts as { size: number; crc32: number }[]);
+  return file.crc32 ?? partsCrc32(file.size, file.parts);
+}
+
+/** A file's CRC32 from its chunks', or null when they weren't streamed through the server (direct mode). */
+export function partsCrc32(size: number, parts: schema.FilePart[]): number | null {
+  if (size > 0 && parts.length === 0) return null;
+  if (parts.some((part) => typeof part.crc32 !== "number")) return null;
+  return combineCrc32(parts as { size: number; crc32: number }[]);
 }
 
 /**
@@ -529,6 +534,7 @@ export function createShareService({
               ? chunkHashesFingerprint(partsForDb.map((part) => part.sha256!))
               : null,
             fingerprintEtag: stored.etag,
+            crc32: partsCrc32(file.size, partsForDb),
           })
           .where(and(eq(files.id, file.id), isNull(files.completedAt)));
       }
@@ -602,8 +608,9 @@ export function createShareService({
      * The whole share as one store-only ZIP64, like {@link openDownload} for a
      * file: "unavailable", or null for anything not downloadable. When every
      * file's CRC32 is known up front, the archive is laid out with an exact
-     * size and ETag so Range requests work; otherwise (e.g., direct-mode files
-     * before background CRC32 runs) it streams with ZIP data descriptors.
+     * size and ETag so Range requests work; otherwise (direct-mode files the
+     * cleanup worker hasn't checksummed yet) it streams with ZIP data
+     * descriptors, without Range support.
      * Every file's fingerprint is checked before any bytes are served, and each
      * read is guarded again.
      */

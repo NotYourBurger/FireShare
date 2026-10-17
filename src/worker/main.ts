@@ -20,12 +20,13 @@ const cleanup = createCleanup({
 });
 
 let stopping = false;
+const stop = new AbortController();
 let timer: NodeJS.Timeout | undefined;
 
 async function tick() {
   timer = undefined;
   try {
-    console.log(describe(await cleanup.run()));
+    console.log(describe(await cleanup.run(stop.signal)));
   } catch (err) {
     console.error("Cleanup run failed:", err);
   }
@@ -39,14 +40,17 @@ function describe(report: CleanupReport): string {
     `${report.abandonedShares} abandoned uploads (${formatBytes(report.abandonedBytes)})`,
   ];
   const reclaimed = formatBytes(report.removedBytes + report.abandonedBytes);
-  const failed = report.failures > 0 ? `; ${report.failures} shares failed and will be retried` : "";
-  return `Cleanup removed ${parts.join(" and ")}, reclaiming ${reclaimed}${failed}`;
+  const checksummed = `computed the CRC32 of ${report.checksummedFiles} direct-mode files (${formatBytes(report.checksummedBytes)} read)`;
+  const failed = report.failures > 0 ? `; ${report.failures} shares or files failed and will be retried` : "";
+  return `Cleanup removed ${parts.join(" and ")}, reclaiming ${reclaimed}, and ${checksummed}${failed}`;
 }
 
-// Stop between runs; a run cut short is completed by the next one anyway.
+// Stop between runs, or between files of a CRC32 job that may take a while;
+// a run cut short is completed by the next one anyway.
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {
     stopping = true;
+    stop.abort();
     if (timer) {
       clearTimeout(timer);
       void pool.end();
