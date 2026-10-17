@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { buffer } from "node:stream/consumers";
 import { describe, expect, it } from "vitest";
-import { MIN_PART_SIZE, type StorageAdapter } from "./adapter";
+import { MIN_PART_SIZE, ObjectChangedError, type StorageAdapter } from "./adapter";
 import { createMemoryStorage } from "./memory";
 import { createS3Storage } from "./s3";
 
@@ -44,6 +44,21 @@ describe.each(drivers)("%s storage driver", (_name, create) => {
     expect(await storage.head(key)).toMatchObject({ size: first.length + last.length });
     const stored = await buffer(await storage.getReadStream(key));
     expect(stored.equals(Buffer.concat([first, last]))).toBe(true);
+  });
+
+  it("reads a byte range, and refuses a read whose ETag no longer matches", async () => {
+    const storage = await create();
+    const key = randomUUID();
+    const { uploadId } = await storage.createUpload(key);
+    const part = await storage.writePart(key, uploadId, 1, Readable.from([Buffer.from("0123456789")]), 10);
+    await storage.completeUpload(key, uploadId, [part]);
+    const { etag } = (await storage.head(key))!;
+
+    const range = await storage.getReadStream(key, { range: { start: 2, end: 5 }, ifMatch: etag });
+    expect((await buffer(range)).toString()).toBe("2345");
+    await expect(storage.getReadStream(key, { ifMatch: '"not-the-etag"' })).rejects.toBeInstanceOf(
+      ObjectChangedError,
+    );
   });
 
   it("stores an empty file as a single empty part", async () => {

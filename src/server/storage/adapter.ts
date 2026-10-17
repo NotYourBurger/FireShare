@@ -10,6 +10,27 @@ export interface ObjectInfo {
   etag: string;
 }
 
+/** Inclusive byte offsets, as in an HTTP `Range` header. */
+export interface ByteRange {
+  start: number;
+  end: number;
+}
+
+export interface ReadOptions {
+  /** Only these bytes; `end` must be within the object. */
+  range?: ByteRange;
+  /** Refuse with {@link ObjectChangedError} unless the object still has this ETag. */
+  ifMatch?: string;
+}
+
+/** The object no longer has the ETag a read was made against. */
+export class ObjectChangedError extends Error {
+  constructor(key: string) {
+    super(`Object ${key} has changed`);
+    this.name = "ObjectChangedError";
+  }
+}
+
 /**
  * The only way FireShare touches file bytes. Nothing outside a driver may
  * talk to a storage SDK directly.
@@ -29,7 +50,7 @@ export interface StorageAdapter {
     length: number,
   ): Promise<UploadedPart>;
   completeUpload(key: string, uploadId: string, parts: UploadedPart[]): Promise<void>;
-  getReadStream(key: string): Promise<Readable>;
+  getReadStream(key: string, options?: ReadOptions): Promise<Readable>;
   /** Returns null when the object doesn't exist. */
   head(key: string): Promise<ObjectInfo | null>;
   delete(key: string): Promise<void>;

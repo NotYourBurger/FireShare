@@ -1,21 +1,24 @@
 import { createHash } from "node:crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import { Readable } from "node:stream";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadExpiryConfig, loadUploadConfig } from "./config";
 import { createTestDb } from "./db/test-db";
-import { createHttpHandlers, MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, type HttpHandlers } from "./http";
+import { createHttpHandlers, MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, parseRange, type HttpHandlers } from "./http";
 import { createShareService } from "./shares";
 import { createMemoryStorage } from "./storage/memory";
-import { MIN_PART_SIZE } from "./storage/adapter";
+import { MIN_PART_SIZE, type StorageAdapter } from "./storage/adapter";
 import { generateToken } from "./tokens";
 
 let http: HttpHandlers;
+let storage: StorageAdapter;
 let clock: Date;
 
 beforeEach(async () => {
   clock = new Date("2026-01-01T00:00:00Z");
+  storage = createMemoryStorage();
   const shares = createShareService({
     db: await createTestDb(),
-    storage: createMemoryStorage(),
+    storage,
     now: () => clock,
   });
   http = createHttpHandlers({
@@ -334,6 +337,96 @@ describe("HTTP API", () => {
     expect(http.uploadOptions()).toMatchObject({ chunkSize: 8 * 1024 * 1024, parallelFiles: 2 });
   });
 
+  describe("resumable downloads", () => {
+    it("advertises byte ranges and answers a Range request with 206", async () => {
+      const path = await share("a.txt", "0123456789");
+      const full = await download(path);
+      expect(full.headers.get("Accept-Ranges")).toBe("bytes");
+      expect(full.headers.get("ETag")).toMatch(/^"[0-9a-f]{64}"$/);
+
+      const res = await download(path, { Range: "bytes=2-5" });
+      expect(res.status).toBe(206);
+      expect(res.headers.get("Content-Range")).toBe("bytes 2-5/10");
+      expect(res.headers.get("Content-Length")).toBe("4");
+      expect(res.headers.get("Content-Disposition")).toMatch(/^attachment;/);
+      expect(await res.text()).toBe("2345");
+    });
+
+    it("resumes an interrupted download into a byte-identical file", async () => {
+      const data = Buffer.alloc(MIN_PART_SIZE + 1000);
+      for (let i = 0; i < data.length; i++) data[i] = (i * 31) % 251;
+      const created = await (await createShare([{ name: "big.bin", size: data.length }])).json();
+      const fileId = created.files[0].id;
+      await patch(fileId, 0, data.subarray(0, MIN_PART_SIZE));
+      await patch(fileId, MIN_PART_SIZE, data.subarray(MIN_PART_SIZE));
+      const { path } = await (await finalize(created.id)).json();
+      const filePath = `${path}/files/${fileId}`;
+
+      // The connection drops halfway through.
+      const first = await download(filePath);
+      const half = Buffer.from(await first.arrayBuffer()).subarray(0, Math.floor(data.length / 2));
+
+      const rest = await download(filePath, { Range: `bytes=${half.length}-`, "If-Range": first.headers.get("ETag")! });
+      expect(rest.status).toBe(206);
+      expect(rest.headers.get("Content-Range")).toBe(`bytes ${half.length}-${data.length - 1}/${data.length}`);
+      const resumed = Buffer.concat([half, Buffer.from(await rest.arrayBuffer())]);
+      expect(resumed.equals(data)).toBe(true);
+    });
+
+    it("sends the whole file when If-Range names another version", async () => {
+      const path = await share("a.txt", "0123456789");
+      const res = await download(path, { Range: "bytes=5-", "If-Range": '"something-else"' });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Range")).toBeNull();
+      expect(await res.text()).toBe("0123456789");
+    });
+
+    it("answers a range past the end with 416 and the file size", async () => {
+      const path = await share("a.txt", "0123456789");
+      const res = await download(path, { Range: "bytes=10-" });
+      expect(res.status).toBe(416);
+      expect(res.headers.get("Content-Range")).toBe("bytes */10");
+      expect(await res.text()).toBe("");
+    });
+
+    it("streams from storage instead of buffering the file", async () => {
+      const path = await share("a.txt", "x");
+      let pulled = 0;
+      storage.getReadStream = async () =>
+        Readable.from(
+          (function* () {
+            for (let i = 0; i < 10_000; i++, pulled++) yield Buffer.alloc(64 * 1024);
+          })(),
+        );
+
+      const res = await download(path);
+      const reader = res.body!.getReader();
+      await reader.read();
+      await reader.cancel();
+      expect(pulled).toBeLessThan(100);
+    });
+
+    it("refuses with a clear page, and logs, when the stored file no longer matches its fingerprint", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const path = await share("a.txt", "0123456789");
+      const head = storage.head;
+      storage.head = async (key) => {
+        const info = await head(key);
+        return info && { ...info, etag: '"changed"' };
+      };
+
+      for (const headers of [{}, { Range: "bytes=5-" }] as Record<string, string>[]) {
+        const res = await download(path, headers);
+        expect(res.status).toBe(409);
+        expect(res.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+        expect(res.headers.get("Content-Disposition")).toBeNull();
+        expect(await res.text()).toContain("This file can't be downloaded");
+      }
+      expect(errors).toHaveBeenCalledTimes(2);
+      errors.mockRestore();
+    });
+  });
+
   describe("expiry", () => {
     it("offers the configured presets with the default preselected", () => {
       expect(http.uploadOptions()).toMatchObject({ expiryOptions: ["12h", "1d", "7d"], expiryDefault: "1d" });
@@ -375,5 +468,27 @@ describe("HTTP API", () => {
       }
       expect(await http.viewShare(path.split("/")[2])).toBe("expired");
     });
+  });
+});
+
+describe("Range header parsing", () => {
+  it.each([
+    ["bytes=0-4", 10, { start: 0, end: 4 }],
+    ["bytes=4-", 10, { start: 4, end: 9 }],
+    ["bytes=4-100", 10, { start: 4, end: 9 }],
+    ["bytes=-3", 10, { start: 7, end: 9 }],
+    ["bytes=-100", 10, { start: 0, end: 9 }],
+    ["bytes=10-", 10, "unsatisfiable"],
+    ["bytes=-0", 10, "unsatisfiable"],
+    ["bytes=0-", 0, "unsatisfiable"],
+    ["bytes=-1", 0, "unsatisfiable"],
+    [null, 10, null],
+    ["bytes=5-2", 10, null],
+    ["bytes=0-1,4-5", 10, null],
+    ["bytes=-", 10, null],
+    ["items=0-1", 10, null],
+    ["bytes=99999999999999999999-", 10, null],
+  ] as const)("%s of %i bytes → %o", (header, size, expected) => {
+    expect(parseRange(header, size)).toEqual(expected);
   });
 });

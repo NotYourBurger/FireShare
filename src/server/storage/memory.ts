@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { buffer } from "node:stream/consumers";
-import type { StorageAdapter, UploadedPart } from "./adapter";
+import { ObjectChangedError, type StorageAdapter, type UploadedPart } from "./adapter";
 import { exactLength } from "./exact-length";
 
 /** An in-process driver for tests and local experiments. */
@@ -38,10 +38,11 @@ export function createMemoryStorage(): StorageAdapter {
       objects.set(key, { data, etag: `${md5(data)}-${parts.length}` });
     },
 
-    async getReadStream(key) {
+    async getReadStream(key, { range, ifMatch } = {}) {
       const object = objects.get(key);
       if (!object) throw new Error("No such object");
-      return Readable.from([object.data]);
+      if (ifMatch !== undefined && ifMatch !== object.etag) throw new ObjectChangedError(key);
+      return Readable.from([range ? object.data.subarray(range.start, range.end + 1) : object.data]);
     },
 
     async head(key) {
