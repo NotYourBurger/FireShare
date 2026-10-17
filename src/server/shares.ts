@@ -196,7 +196,10 @@ export function createShareService({
         uploads.push({ storageKey, multipartUploadId: uploadId });
       }
       return db.transaction(async (tx) => {
-        const [share] = await tx.insert(shares).values({ title, message, expirySeconds }).returning({ id: shares.id });
+        const [share] = await tx
+          .insert(shares)
+          .values({ title, message, expirySeconds, createdAt: now() })
+          .returning({ id: shares.id });
         const created = await tx
           .insert(files)
           .values(newFiles.map((file, i) => ({ ...file, ...uploads[i], shareId: share.id, position: i })))

@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:worker": "esbuild src/worker/main.ts --bundle --platform=node --target=node22 --format=cjs --external:pg-native --outfile=dist/worker.cjs",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -29,6 +30,7 @@
     "@types/react-dom": "^19.3.0",
     "@types/yauzl": "2.10.3",
     "drizzle-kit": "0.31.11",
+    "esbuild": "0.28.2",
     "typescript": "5.9.3",
     "vitest": "5.0.5",
     "yauzl": "3.2.0"

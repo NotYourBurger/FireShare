@@ -50,9 +50,15 @@ export interface StorageAdapter {
     length: number,
   ): Promise<UploadedPart>;
   completeUpload(key: string, uploadId: string, parts: UploadedPart[]): Promise<void>;
+  /**
+   * Discards an incomplete multipart upload and its parts. Succeeds when the
+   * upload no longer exists, whether aborted or completed.
+   */
+  abortUpload(key: string, uploadId: string): Promise<void>;
   getReadStream(key: string, options?: ReadOptions): Promise<Readable>;
   /** Returns null when the object doesn't exist. */
   head(key: string): Promise<ObjectInfo | null>;
+  /** Succeeds when the object doesn't exist. */
   delete(key: string): Promise<void>;
 }
 

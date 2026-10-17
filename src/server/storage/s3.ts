@@ -1,4 +1,5 @@
 import {
+  AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
   CreateBucketCommand,
   CreateMultipartUploadCommand,
@@ -102,6 +103,15 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
           },
         }),
       );
+    },
+
+    async abortUpload(key, uploadId) {
+      try {
+        await client.send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: uploadId }));
+      } catch (err) {
+        // NoSuchUpload: already aborted or completed.
+        if (!isNotFound(err)) throw err;
+      }
     },
 
     async getReadStream(key, { range, ifMatch } = {}) {

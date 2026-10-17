@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig, loadExpiryConfig, loadUploadConfig } from "./config";
+import { loadCleanupConfig, loadConfig, loadExpiryConfig, loadUploadConfig } from "./config";
 
 describe("expiry config", () => {
   it("defaults to 1d,3d,7d,14d,30d with 7d preselected", () => {
@@ -83,5 +83,27 @@ describe("upload config", () => {
 
   it.each(["0", "11", "2.5", "-1", "three"])("rejects UPLOAD_PARALLEL_FILES=%s", (value) => {
     expect(() => loadUploadConfig({ UPLOAD_PARALLEL_FILES: value })).toThrow(/^Invalid UPLOAD_PARALLEL_FILES/);
+  });
+});
+
+describe("cleanup config", () => {
+  it("defaults to a 1h delete grace and a 24h pending TTL", () => {
+    expect(loadCleanupConfig({})).toEqual({ deleteGraceSeconds: 3600, pendingTtlSeconds: 86400 });
+  });
+
+  it("reads minutes, hours and days, including no grace at all", () => {
+    expect(loadCleanupConfig({ DELETE_GRACE: "0m", PENDING_TTL: "2d" })).toEqual({
+      deleteGraceSeconds: 0,
+      pendingTtlSeconds: 2 * 86400,
+    });
+    expect(loadCleanupConfig({ DELETE_GRACE: "90m" }).deleteGraceSeconds).toBe(90 * 60);
+  });
+
+  it.each(["1", "1w", "1.5h", "-1h", "01h", "1H", "100000d"])("rejects DELETE_GRACE=%s", (value) => {
+    expect(() => loadCleanupConfig({ DELETE_GRACE: value })).toThrow(/^Invalid DELETE_GRACE/);
+  });
+
+  it("rejects an invalid PENDING_TTL", () => {
+    expect(() => loadCleanupConfig({ PENDING_TTL: "1 day" })).toThrow(/^Invalid PENDING_TTL "1 day"/);
   });
 });

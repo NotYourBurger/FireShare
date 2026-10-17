@@ -84,6 +84,32 @@ describe.each(drivers)("%s storage driver", (_name, create) => {
     expect(await storage.head(key)).toBeNull();
   });
 
+  it("aborts an incomplete upload, and aborting again or after completion succeeds", async () => {
+    const storage = await create();
+    const key = randomUUID();
+    const { uploadId } = await storage.createUpload(key);
+    await storage.writePart(key, uploadId, 1, Readable.from([Buffer.from("hi")]), 2);
+    await storage.abortUpload(key, uploadId);
+    await storage.abortUpload(key, uploadId);
+
+    await expect(
+      storage.writePart(key, uploadId, 2, Readable.from([Buffer.from("hi")]), 2),
+    ).rejects.toThrow();
+    expect(await storage.head(key)).toBeNull();
+
+    const done = randomUUID();
+    const upload = await storage.createUpload(done);
+    const part = await storage.writePart(done, upload.uploadId, 1, Readable.from([Buffer.from("hi")]), 2);
+    await storage.completeUpload(done, upload.uploadId, [part]);
+    await storage.abortUpload(done, upload.uploadId);
+    expect(await storage.head(done)).toMatchObject({ size: 2 });
+  });
+
+  it("deletes a missing object without error", async () => {
+    const storage = await create();
+    await storage.delete(randomUUID());
+  });
+
   it("rejects a part whose body is shorter than its declared length", async () => {
     const storage = await create();
     const key = randomUUID();

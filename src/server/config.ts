@@ -15,6 +15,7 @@ export function loadConfig(env: Env = process.env) {
     },
     expiry: loadExpiryConfig(env),
     upload: loadUploadConfig(env),
+    cleanup: loadCleanupConfig(env),
   };
 }
 
@@ -90,6 +91,33 @@ export function loadUploadConfig(env: Env = process.env): UploadConfig {
     );
   }
   return { chunkSize, parallelFiles };
+}
+
+export interface CleanupConfig {
+  /** How long an expired or deleted share's bytes are kept, so downloads under way can finish. */
+  deleteGraceSeconds: number;
+  /** How old a `pending` share gets before it counts as abandoned. */
+  pendingTtlSeconds: number;
+}
+
+const DURATION = /^(0|[1-9]\d{0,4})([mhd])$/;
+const DURATION_SECONDS = { m: 60, h: 3600, d: 86400 };
+
+/** When the cleanup worker reclaims storage; throws on any invalid value. */
+export function loadCleanupConfig(env: Env = process.env): CleanupConfig {
+  return {
+    deleteGraceSeconds: duration(env, "DELETE_GRACE", "1h"),
+    pendingTtlSeconds: duration(env, "PENDING_TTL", "24h"),
+  };
+}
+
+function duration(env: Env, name: string, fallback: string): number {
+  const value = env[name] || fallback;
+  const match = DURATION.exec(value);
+  if (!match) {
+    throw new Error(`Invalid ${name} "${value}": use a whole number of minutes, hours or days, like 30m, 1h or 2d`);
+  }
+  return Number(match[1]) * DURATION_SECONDS[match[2] as keyof typeof DURATION_SECONDS];
 }
 
 function required(env: Env, name: string): string {
