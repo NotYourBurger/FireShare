@@ -1,4 +1,4 @@
-import { bigint, integer, jsonb, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { bigint, index, integer, jsonb, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import type { UploadedPart } from "../storage/adapter";
 
 /** One received chunk: the storage part it became, plus its integrity data. */
@@ -10,30 +10,36 @@ export interface FilePart extends UploadedPart {
   crc32: number;
 }
 
-export const shares = pgTable("shares", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  /**
-   * Expiry isn't a status: a `ready` share is expired once `expiresAt` has
-   * passed. `abandoned` is a `pending` share past `PENDING_TTL` that the
-   * cleanup worker has claimed; its row goes once its storage is gone.
-   */
-  status: text("status", { enum: ["pending", "ready", "deleted", "abandoned"] }).notNull().default("pending"),
-  /** SHA-256 of the share link token; the token itself is never stored. */
-  tokenHash: text("token_hash").unique(),
-  /** SHA-256 of the management link token, issued with the share link. Null for shares from before management links. */
-  managementTokenHash: text("management_token_hash").unique(),
-  /** Sender-supplied plain text, shown to recipients. */
-  title: text("title"),
-  message: text("message"),
-  /** How long the link works once the share is ready, from the uploader's chosen preset. */
-  expirySeconds: integer("expiry_seconds").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  readyAt: timestamp("ready_at", { withTimezone: true }),
-  /** Set with `readyAt`; from then on the link serves nothing. Never extended. */
-  expiresAt: timestamp("expires_at", { withTimezone: true }),
-  /** When the uploader deleted the share early through its management link. */
-  deletedAt: timestamp("deleted_at", { withTimezone: true }),
-});
+export const shares = pgTable(
+  "shares",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /**
+     * Expiry isn't a status: a `ready` share is expired once `expiresAt` has
+     * passed. `abandoned` is a `pending` share past `PENDING_TTL` that the
+     * cleanup worker has claimed; its row goes once its storage is gone.
+     */
+    status: text("status", { enum: ["pending", "ready", "deleted", "abandoned"] }).notNull().default("pending"),
+    /** SHA-256 of the share link token; the token itself is never stored. */
+    tokenHash: text("token_hash").unique(),
+    /** SHA-256 of the management link token, issued with the share link. Null for shares from before management links. */
+    managementTokenHash: text("management_token_hash").unique(),
+    /** Sender-supplied plain text, shown to recipients. */
+    title: text("title"),
+    message: text("message"),
+    /** How long the link works once the share is ready, from the uploader's chosen preset. */
+    expirySeconds: integer("expiry_seconds").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    readyAt: timestamp("ready_at", { withTimezone: true }),
+    /** Set with `readyAt`; from then on the link serves nothing. Never extended. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    /** When the uploader deleted the share early through its management link. */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    /** The uploader's IP address, for the per-IP quotas. Null when it wasn't known. */
+    clientIp: text("client_ip"),
+  },
+  (table) => [index().on(table.clientIp, table.createdAt)],
+);
 
 export const files = pgTable(
   "files",

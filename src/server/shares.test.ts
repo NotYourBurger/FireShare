@@ -42,6 +42,7 @@ const write = (fileId: string, offset: number, data: Buffer | string, length = B
   service.writeChunk(fileId, offset, body(data), length, sha256(data));
 
 const withFiles = (files: NewFile[], expirySeconds = 7 * DAY): NewShare => ({
+  clientIp: null,
   title: null,
   message: null,
   expirySeconds,
@@ -139,11 +140,12 @@ describe("share service", () => {
       );
     });
 
-    it("rejects a chunk that would run past the declared size", async () => {
+    it("fails the share when a chunk would run past the declared size", async () => {
       const { fileId } = await pendingFile(2);
-      await expect(write(fileId, 0, "xyz")).rejects.toThrow(
-        expect.objectContaining({ code: "invalid_chunk" }),
-      );
+      await expect(write(fileId, 0, "xyz")).rejects.toThrow(expect.objectContaining({ code: "too_large" }));
+      expect(await service.getUpload(fileId)).toBeNull();
+      const [share] = await db.select().from(schema.shares);
+      expect(share.status).toBe("abandoned");
     });
 
     it("rejects a non-final chunk smaller than the storage minimum part size", async () => {
@@ -391,6 +393,7 @@ describe("share service", () => {
     it("serves every file of one share through its single token, in the uploader's order", async () => {
       const message = "Shot 12, v3.\nCall me if anything's off.";
       const share = await service.createShare({
+        clientIp: null,
         title: "Final renders",
         message,
         expirySeconds: DAY,

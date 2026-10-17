@@ -225,9 +225,9 @@ describe("HTTP API", () => {
       expect((await patch(id, 2, "cd")).status).toBe(409);
     });
 
-    it("answers an oversized chunk with 400", async () => {
+    it("answers an oversized chunk with 413", async () => {
       const id = await pendingUpload(2);
-      expect((await patch(id, 0, "abcd")).status).toBe(400);
+      expect((await patch(id, 0, "abcd")).status).toBe(413);
     });
 
     it("answers unknown uploads with 404", async () => {

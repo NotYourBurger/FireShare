@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { loadAccessConfig, loadConfig } from "./config";
 import { schema, type Database } from "./db";
 import { createHttpHandlers, type HttpHandlers } from "./http";
+import { createRateLimiter } from "./rate-limit";
 import { createShareService } from "./shares";
 import { createS3Storage } from "./storage/s3";
 import { createUploadAccess } from "./upload-access";
@@ -28,12 +29,15 @@ async function start(): Promise<HttpHandlers> {
   const storage = createS3Storage(config.s3);
   await retry(() => storage.ensureBucket(), "storage");
 
-  const shares = createShareService({ db: db as unknown as Database, storage });
+  const { rateLimitUpload, rateLimitDownload, ...shareLimits } = config.limits;
+  const shares = createShareService({ db: db as unknown as Database, storage, limits: shareLimits });
+  const perMinute = (limit: number | null) => (limit === null ? null : createRateLimiter({ limit, windowSeconds: 60 }));
   return createHttpHandlers({
     shares,
     expiry: config.expiry,
     upload: config.upload,
     access: createUploadAccess(loadAccessConfig()),
+    rateLimits: { upload: perMinute(rateLimitUpload), download: perMinute(rateLimitDownload) },
   });
 }
 

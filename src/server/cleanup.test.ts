@@ -39,6 +39,7 @@ const sha256 = (data: string) => createHash("sha256").update(data).digest("hex")
 /** Creates a share of these files and uploads all of them. */
 async function uploaded(contents: string[], expirySeconds = DAY) {
   const share = await service.createShare({
+    clientIp: null,
     title: null,
     message: null,
     expirySeconds,

@@ -50,6 +50,11 @@ export function createUploadAccess(config: AccessConfig, now: () => Date = () =>
     /** Where download pages link to report abuse, or null for no link. */
     abuseReportUrl: config.abuseReportUrl,
 
+    /** The client's IP address, through `TRUSTED_PROXIES`; null when unknown. */
+    clientAddress(headers: RequestHeaders): string | null {
+      return clientAddress(headers, config.trustedProxies);
+    },
+
     /** Whether bytes may be uploaded with these request headers. */
     check(headers: RequestHeaders): UploadAccess {
       if (!fromAllowedNetwork(headers)) return "network";

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { loadAccessConfig, loadCleanupConfig, loadConfig, loadExpiryConfig, loadUploadConfig } from "./config";
+import {
+  loadAccessConfig,
+  loadCleanupConfig,
+  loadConfig,
+  loadExpiryConfig,
+  loadLimitsConfig,
+  loadUploadConfig,
+} from "./config";
 
 describe("expiry config", () => {
   it("defaults to 1d,3d,7d,14d,30d with 7d preselected", () => {
@@ -83,6 +90,84 @@ describe("upload config", () => {
 
   it.each(["0", "11", "2.5", "-1", "three"])("rejects UPLOAD_PARALLEL_FILES=%s", (value) => {
     expect(() => loadUploadConfig({ UPLOAD_PARALLEL_FILES: value })).toThrow(/^Invalid UPLOAD_PARALLEL_FILES/);
+  });
+});
+
+describe("limits config", () => {
+  const off = {
+    maxShareSize: null,
+    maxFilesPerShare: null,
+    maxTotalStorage: null,
+    uploadQuotaPerIp: null,
+    maxActiveSharesPerIp: null,
+    rateLimitUpload: null,
+    rateLimitDownload: null,
+  };
+
+  it("turns every limit off when unset or empty", () => {
+    expect(loadLimitsConfig({})).toEqual(off);
+    expect(
+      loadLimitsConfig({
+        MAX_SHARE_SIZE: "",
+        MAX_FILES_PER_SHARE: " ",
+        MAX_TOTAL_STORAGE: "",
+        UPLOAD_QUOTA_PER_IP: "",
+        MAX_ACTIVE_SHARES_PER_IP: "",
+        RATE_LIMIT_UPLOAD: "",
+        RATE_LIMIT_DOWNLOAD: "",
+      }),
+    ).toEqual(off);
+  });
+
+  it("reads sizes in KB, MB, GB or TB and whole-number counts", () => {
+    expect(
+      loadLimitsConfig({
+        MAX_SHARE_SIZE: "50GB",
+        MAX_FILES_PER_SHARE: "500",
+        MAX_TOTAL_STORAGE: "2TB",
+        UPLOAD_QUOTA_PER_IP: "500MB",
+        MAX_ACTIVE_SHARES_PER_IP: "20",
+        RATE_LIMIT_UPLOAD: "600",
+        RATE_LIMIT_DOWNLOAD: "300",
+      }),
+    ).toEqual({
+      maxShareSize: { bytes: 50 * 1024 ** 3, value: "50GB" },
+      maxFilesPerShare: 500,
+      maxTotalStorage: { bytes: 2 * 1024 ** 4, value: "2TB" },
+      uploadQuotaPerIp: { bytes: 500 * 1024 ** 2, value: "500MB" },
+      maxActiveSharesPerIp: 20,
+      rateLimitUpload: 600,
+      rateLimitDownload: 300,
+    });
+    expect(loadLimitsConfig({ UPLOAD_QUOTA_PER_IP: "64KB" }).uploadQuotaPerIp).toEqual({ bytes: 65536, value: "64KB" });
+  });
+
+  it.each(["MAX_SHARE_SIZE", "MAX_TOTAL_STORAGE", "UPLOAD_QUOTA_PER_IP"])("rejects invalid sizes in %s", (name) => {
+    for (const value of ["50", "50gb", "50 GB", "1.5GB", "0GB", "-1GB", "50PB", "99999999TB"]) {
+      expect(() => loadLimitsConfig({ [name]: value })).toThrow(new RegExp(`^Invalid ${name} "${value}"`));
+    }
+  });
+
+  it.each(["MAX_FILES_PER_SHARE", "MAX_ACTIVE_SHARES_PER_IP", "RATE_LIMIT_UPLOAD", "RATE_LIMIT_DOWNLOAD"])(
+    "rejects invalid counts in %s",
+    (name) => {
+      for (const value of ["0", "-1", "2.5", "ten", "1e3", "010"]) {
+        expect(() => loadLimitsConfig({ [name]: value })).toThrow(new RegExp(`^Invalid ${name} "${value}"`));
+      }
+    },
+  );
+
+  it("stops the app at startup on an invalid limit", () => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: "postgres://x",
+        S3_ENDPOINT: "http://x",
+        S3_BUCKET: "b",
+        S3_ACCESS_KEY_ID: "k",
+        S3_SECRET_ACCESS_KEY: "s",
+        MAX_SHARE_SIZE: "lots",
+      }),
+    ).toThrow(/^Invalid MAX_SHARE_SIZE/);
   });
 });
 
