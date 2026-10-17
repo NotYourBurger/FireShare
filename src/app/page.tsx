@@ -9,7 +9,9 @@ export default async function Home() {
   return (
     <main>
       <h1>FireShare</h1>
-      <p className="tagline">Upload files and get one link to share them.</p>
+      <p className="tagline">
+        Upload files and get one link to share them. <a href="/recent">Recent shares</a>
+      </p>
       <UploadForm {...options} />
     </main>
   );

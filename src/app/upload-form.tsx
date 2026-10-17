@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { uploadFile } from "./chunked-upload";
+import { CopyField } from "./copy-field";
 import { formatBytes, formatExpiry } from "./format";
 import {
   clearPendingUpload,
@@ -10,6 +11,7 @@ import {
   savePendingUpload,
   type PendingUpload,
 } from "./pending-upload";
+import { addRecentShare } from "./recent-shares";
 
 // Keep in step with MAX_TITLE_LENGTH and MAX_MESSAGE_LENGTH in src/server/http.ts.
 const MAX_TITLE_LENGTH = 200;
@@ -35,7 +37,7 @@ type State =
   | { step: "resume"; pending: PendingUpload; offsets: number[]; picked: (File | undefined)[]; error?: string }
   | { step: "uploading"; progress: FileProgress[] }
   | { step: "failed"; job: Job; progress: FileProgress[]; message: string }
-  | { step: "done"; url: string; expiry: string };
+  | { step: "done"; url: string; manageUrl: string; expiry: string };
 
 export function UploadForm({
   expiryOptions,
@@ -98,6 +100,7 @@ export function UploadForm({
     const pending: PendingUpload = {
       shareId: created.id,
       expiry,
+      title: title.trim() || null,
       files: files.map((file, i) => ({
         name: file.name,
         size: file.size,
@@ -149,9 +152,12 @@ export function UploadForm({
     try {
       await Promise.all(Array.from({ length: Math.min(parallelFiles, queue.length) }, worker));
       if (abort.signal.aborted) throw abort.signal.reason;
-      const { path } = await postJson(`/api/shares/${job.pending.shareId}/finalize`);
+      const { path, managementPath, expiresAt } = await postJson(`/api/shares/${job.pending.shareId}/finalize`);
+      const url = new URL(path, location.href).href;
+      const manageUrl = new URL(managementPath, location.href).href;
       clearPendingUpload();
-      setState({ step: "done", url: new URL(path, location.href).href, expiry: job.pending.expiry });
+      addRecentShare({ url, manageUrl, title: job.pending.title ?? null, expiresAt });
+      setState({ step: "done", url, manageUrl, expiry: job.pending.expiry });
     } catch (err) {
       const stopped = progress.map((file) =>
         file.status === "done" || file.status === "failed" ? file : { ...file, status: "paused" as const },
@@ -169,11 +175,9 @@ export function UploadForm({
     return (
       <div className="card">
         <strong>Your link is ready</strong>
-        <div className="link">
-          <input readOnly value={state.url} onFocus={(e) => e.target.select()} aria-label="Share link" />
-          <button onClick={() => navigator.clipboard.writeText(state.url)}>Copy</button>
-        </div>
+        <CopyField value={state.url} label="Share link" />
         <span className="muted">It expires in {formatExpiry(state.expiry)}.</span>
+        <ManagementLink url={state.manageUrl} />
         <button
           onClick={() => {
             setFiles([]);
@@ -335,6 +339,21 @@ export function UploadForm({
       <button disabled={files.length === 0} onClick={share}>
         Upload and get link
       </button>
+    </div>
+  );
+}
+
+/** The management link, shown this one time only. */
+export function ManagementLink({ url }: { url: string }) {
+  return (
+    <div className="save-link" role="note">
+      <strong>Save your management link</strong>
+      <p className="muted">
+        It lets you check on this share or delete it early. Keep it private, and save it now: it&apos;s shown only
+        this once. This browser also lists it under <a href="/recent">Recent shares</a>, unless it&apos;s a private
+        window.
+      </p>
+      <CopyField value={url} label="Management link" />
     </div>
   );
 }

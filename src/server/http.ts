@@ -111,20 +111,40 @@ export function createHttpHandlers({
       }
     },
 
-    /** POST /api/shares/:id/finalize — makes the share `ready` and returns its link once. */
+    /**
+     * POST /api/shares/:id/finalize — makes the share `ready` and returns its
+     * share link and management link, once.
+     */
     async finalize(_req: Request, shareId: string) {
       try {
-        const { token } = await shares.finalize(shareId);
-        return json(200, { path: `/d/${token}` });
+        const { token, managementToken, expiresAt } = await shares.finalize(shareId);
+        return json(200, { path: `/d/${token}`, managementPath: `/m/${managementToken}`, expiresAt });
       } catch (err) {
         if (err instanceof ShareError) return json(errorStatus[err.code], { error: err.message });
         throw err;
       }
     },
 
-    /** Data for the recipient page at /d/:token, "expired", or null to show not-found. */
+    /** Data for the recipient page at /d/:token, "unavailable", or null to show not-found. */
     async viewShare(token: string) {
       return shares.viewShare(token);
+    },
+
+    /** Data for the management page at /m/:token, or null to show not-found. */
+    async viewManagement(managementToken: string) {
+      return shares.manageShare(managementToken);
+    },
+
+    /** GET /api/manage/:token — the share's status and details, for Recent shares. */
+    async getManaged(_req: Request, managementToken: string) {
+      const share = await shares.manageShare(managementToken);
+      return share ? json(200, share) : json(404, { error: "No such share" });
+    },
+
+    /** DELETE /api/manage/:token — stops the share link at once. */
+    async deleteManaged(_req: Request, managementToken: string) {
+      const deleted = await shares.deleteShare(managementToken);
+      return deleted ? new Response(null, { status: 204 }) : json(404, { error: "No such share" });
     },
 
     /**
@@ -134,7 +154,7 @@ export function createHttpHandlers({
     async download(req: Request, token: string, fileId: string) {
       try {
         const file = await shares.openDownload(token, fileId);
-        if (file === "expired") return html(410, EXPIRED_PAGE);
+        if (file === "unavailable") return html(410, UNAVAILABLE_PAGE);
         if (!file) return html(404, NOT_FOUND_PAGE);
         return await serveFile(req, file);
       } catch (err) {
@@ -150,7 +170,7 @@ export function createHttpHandlers({
     async downloadAll(req: Request, token: string) {
       try {
         const archive = await shares.openArchive(token);
-        if (archive === "expired") return html(410, EXPIRED_PAGE);
+        if (archive === "unavailable") return html(410, UNAVAILABLE_PAGE);
         if (!archive) return html(404, NOT_FOUND_PAGE);
         return await serveFile(req, archive);
       } catch (err) {
@@ -238,10 +258,11 @@ const TAMPERED_PAGE = page(
   "A stored copy has changed since it was shared, so FireShare won't serve it. Ask the sender to share it again.",
 );
 
-const EXPIRED_PAGE = page(
-  "Link expired",
-  "This link has expired",
-  "The files it shared are no longer available. Ask the sender for a new link.",
+// Keep in step with ShareUnavailable in src/app/d/[token]/share-view.tsx.
+const UNAVAILABLE_PAGE = page(
+  "Link no longer available",
+  "This link is no longer available",
+  "It has expired or the sender deleted it, so its files can't be downloaded. Ask the sender for a new link.",
 );
 
 /** The validated share, or an error message for the uploader. */

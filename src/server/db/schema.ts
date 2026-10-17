@@ -12,9 +12,12 @@ export interface FilePart extends UploadedPart {
 
 export const shares = pgTable("shares", {
   id: uuid("id").primaryKey().defaultRandom(),
-  status: text("status", { enum: ["pending", "ready"] }).notNull().default("pending"),
+  /** Expiry isn't a status: a `ready` share is expired once `expiresAt` has passed. */
+  status: text("status", { enum: ["pending", "ready", "deleted"] }).notNull().default("pending"),
   /** SHA-256 of the share link token; the token itself is never stored. */
   tokenHash: text("token_hash").unique(),
+  /** SHA-256 of the management link token, issued with the share link. Null for shares from before management links. */
+  managementTokenHash: text("management_token_hash").unique(),
   /** Sender-supplied plain text, shown to recipients. */
   title: text("title"),
   message: text("message"),
@@ -24,6 +27,8 @@ export const shares = pgTable("shares", {
   readyAt: timestamp("ready_at", { withTimezone: true }),
   /** Set with `readyAt`; from then on the link serves nothing. Never extended. */
   expiresAt: timestamp("expires_at", { withTimezone: true }),
+  /** When the uploader deleted the share early through its management link. */
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
 });
 
 export const files = pgTable(

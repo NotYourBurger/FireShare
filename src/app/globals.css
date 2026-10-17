@@ -180,3 +180,53 @@ progress {
 .card p {
   margin: 0;
 }
+
+a {
+  color: var(--accent);
+}
+
+.button.secondary,
+.button.secondary:visited {
+  color: var(--text);
+}
+
+button.danger {
+  background: var(--danger);
+  color: var(--accent-text);
+}
+
+.status {
+  display: inline-block;
+  padding: 0 0.5rem;
+  border-radius: 999px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  background: var(--border);
+}
+
+.status[data-status="active"] {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.save-link,
+.confirm {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+}
+
+.confirm {
+  border-color: var(--danger);
+}
+
+.recent .file-info {
+  gap: 0.5rem;
+}
+
+.note {
+  margin: 0.75rem 0 0;
+  font-size: 0.875rem;
+}

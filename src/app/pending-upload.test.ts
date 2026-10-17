@@ -30,6 +30,16 @@ describe("pending upload", () => {
     expect(loadPendingUpload(store)).toBeNull();
   });
 
+  it("keeps the title, and accepts records saved before titles were kept", () => {
+    const store = memoryStore();
+    savePendingUpload({ ...pending, title: "Shot 12" }, store);
+    expect(loadPendingUpload(store)?.title).toBe("Shot 12");
+    savePendingUpload(pending, store);
+    expect(loadPendingUpload(store)).toEqual(pending);
+    store.items.set("fireshare.pendingUpload", JSON.stringify({ ...pending, title: 7 }));
+    expect(loadPendingUpload(store)).toBeNull();
+  });
+
   it("ignores stored values that aren't a pending upload", () => {
     const store = memoryStore();
     const invalid = [

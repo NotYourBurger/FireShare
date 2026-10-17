@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ShareExpired, ShareView } from "./share-view";
+import { ShareUnavailable, ShareView } from "./share-view";
 
 const token = "AAAAAAAAAAAAAAAAAAAAAA";
 const fileId = "6f1c2b9e-1d2a-4c3b-8e4f-5a6b7c8d9e0f";
@@ -54,9 +54,9 @@ describe("recipient page", () => {
     expect(render({ title: null, message: null, files: files.slice(0, 1), downloadAll: true })).not.toContain("/all");
   });
 
-  it("tells the recipient an expired link's files are gone, without listing them", () => {
-    const html = renderToStaticMarkup(<ShareExpired />);
-    expect(html).toContain("This link has expired");
+  it("tells the recipient an expired or deleted link's files are gone, without listing them", () => {
+    const html = renderToStaticMarkup(<ShareUnavailable />);
+    expect(html).toContain("This link is no longer available");
     expect(html).not.toContain("Download");
   });
 });
