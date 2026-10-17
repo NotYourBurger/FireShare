@@ -11,12 +11,9 @@ import {
 
 describe("transfer config", () => {
   it("defaults to proxy mode without requiring a direct endpoint", () => {
-    expect(loadTransferConfig({})).toEqual({ mode: "proxy", directEndpoint: null, appOrigin: null });
-    expect(loadTransferConfig({ TRANSFER_MODE: "proxy" })).toEqual({
-      mode: "proxy",
-      directEndpoint: null,
-      appOrigin: null,
-    });
+    const proxy = { mode: "proxy", directEndpoint: null, appOrigin: null, directNetworks: null };
+    expect(loadTransferConfig({})).toEqual(proxy);
+    expect(loadTransferConfig({ TRANSFER_MODE: "proxy" })).toEqual(proxy);
   });
 
   it("reads the HTTPS direct endpoint and optional app origin for direct and auto modes", () => {
@@ -30,13 +27,15 @@ describe("transfer config", () => {
       mode: "direct",
       directEndpoint: "https://storage.lan.example.com:9443",
       appOrigin: "https://share.example.com",
+      directNetworks: null,
     });
     expect(
       loadTransferConfig({
         TRANSFER_MODE: "auto",
         STORAGE_DIRECT_ENDPOINT: "https://storage.lan.example.com/s3",
+        DIRECT_NETWORKS: "192.168.1.0/24",
       }),
-    ).toEqual({
+    ).toMatchObject({
       mode: "auto",
       directEndpoint: "https://storage.lan.example.com/s3",
       appOrigin: null,
@@ -44,9 +43,54 @@ describe("transfer config", () => {
   });
 
   it.each(["direct", "auto"])("refuses to start in %s mode when STORAGE_DIRECT_ENDPOINT is missing", (mode) => {
-    expect(() => loadTransferConfig({ TRANSFER_MODE: mode })).toThrow(/^Missing STORAGE_DIRECT_ENDPOINT/);
-    expect(() => loadTransferConfig({ TRANSFER_MODE: mode, STORAGE_DIRECT_ENDPOINT: "  " })).toThrow(
+    const networks = mode === "auto" ? { DIRECT_NETWORKS: "192.168.1.0/24" } : {};
+    expect(() => loadTransferConfig({ TRANSFER_MODE: mode, ...networks })).toThrow(/^Missing STORAGE_DIRECT_ENDPOINT/);
+    expect(() => loadTransferConfig({ TRANSFER_MODE: mode, STORAGE_DIRECT_ENDPOINT: "  ", ...networks })).toThrow(
       /^Missing STORAGE_DIRECT_ENDPOINT/,
+    );
+  });
+
+  it("reads DIRECT_NETWORKS in auto mode", () => {
+    const { directNetworks } = loadTransferConfig({
+      TRANSFER_MODE: "auto",
+      STORAGE_DIRECT_ENDPOINT: "https://storage.lan.example.com",
+      DIRECT_NETWORKS: "192.168.1.0/24, 10.8.0.0/16, fd00::/8",
+    });
+    expect(["192.168.1.20", "10.8.3.4", "fd00::1", "::ffff:192.168.1.7"].map((ip) => directNetworks!.has(ip))).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
+    expect(["192.168.2.1", "203.0.113.5", "2001:db8::1"].some((ip) => directNetworks!.has(ip))).toBe(false);
+  });
+
+  it.each([undefined, "", "  "])("refuses to start in auto mode when DIRECT_NETWORKS is %j", (networks) => {
+    expect(() =>
+      loadTransferConfig({
+        TRANSFER_MODE: "auto",
+        STORAGE_DIRECT_ENDPOINT: "https://storage.lan.example.com",
+        DIRECT_NETWORKS: networks,
+      }),
+    ).toThrow(/^Missing DIRECT_NETWORKS/);
+  });
+
+  it("names a bad DIRECT_NETWORKS entry", () => {
+    expect(() =>
+      loadTransferConfig({
+        TRANSFER_MODE: "auto",
+        STORAGE_DIRECT_ENDPOINT: "https://storage.lan.example.com",
+        DIRECT_NETWORKS: "192.168.1.0/24,lan",
+      }),
+    ).toThrow(/^Invalid DIRECT_NETWORKS entry "lan"/);
+  });
+
+  it.each([
+    { TRANSFER_MODE: "proxy" },
+    { TRANSFER_MODE: "direct", STORAGE_DIRECT_ENDPOINT: "https://storage.lan.example.com" },
+  ])("refuses DIRECT_NETWORKS outside auto mode (%j)", (env) => {
+    expect(() => loadTransferConfig({ ...env, DIRECT_NETWORKS: "192.168.1.0/24" })).toThrow(
+      /^DIRECT_NETWORKS is set but TRANSFER_MODE=(proxy|direct) would ignore it/,
     );
   });
 
@@ -92,6 +136,20 @@ describe("transfer config", () => {
         STORAGE_DIRECT_ENDPOINT: "http://storage.lan.example.com",
       }),
     ).toThrow(/^Invalid STORAGE_DIRECT_ENDPOINT/);
+  });
+
+  it("stops the app at startup when auto mode has no DIRECT_NETWORKS", () => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: "postgres://x",
+        S3_ENDPOINT: "http://x",
+        S3_BUCKET: "b",
+        S3_ACCESS_KEY_ID: "k",
+        S3_SECRET_ACCESS_KEY: "s",
+        TRANSFER_MODE: "auto",
+        STORAGE_DIRECT_ENDPOINT: "https://storage.lan.example.com",
+      }),
+    ).toThrow(/^Missing DIRECT_NETWORKS/);
   });
 });
 

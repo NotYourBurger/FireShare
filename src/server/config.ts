@@ -30,9 +30,14 @@ export interface TransferConfig {
   directEndpoint: string | null;
   /** The app's own origin for the bucket's CORS rule, when set in `.env`. */
   appOrigin: string | null;
+  /** Clients that transfer directly in `auto` mode, by trusted client IP; null in other modes. */
+  directNetworks: Networks | null;
 }
 
-/** How file bytes travel; throws on any invalid value or a missing HTTPS endpoint for direct transfers. */
+/**
+ * How file bytes travel; throws on any invalid value, a missing HTTPS
+ * endpoint for direct transfers, or `auto` mode without `DIRECT_NETWORKS`.
+ */
 export function loadTransferConfig(env: Env = process.env): TransferConfig {
   const mode = env.TRANSFER_MODE?.trim() || "proxy";
   if (mode !== "proxy" && mode !== "direct" && mode !== "auto") {
@@ -63,7 +68,17 @@ export function loadTransferConfig(env: Env = process.env): TransferConfig {
     }
   }
 
-  return { mode, directEndpoint, appOrigin };
+  const directNetworks = parseNetworks(env.DIRECT_NETWORKS, "DIRECT_NETWORKS");
+  if (mode === "auto" && !directNetworks) {
+    throw new Error(
+      "Missing DIRECT_NETWORKS: TRANSFER_MODE=auto requires the networks that transfer directly, like 192.168.1.0/24,10.8.0.0/16",
+    );
+  }
+  if (mode !== "auto" && directNetworks) {
+    throw new Error(`DIRECT_NETWORKS is set but TRANSFER_MODE=${mode} would ignore it: set TRANSFER_MODE=auto or remove it`);
+  }
+
+  return { mode, directEndpoint, appOrigin, directNetworks };
 }
 
 export interface ExpiryOption {
