@@ -3,6 +3,7 @@ import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import type { ExpiryConfig, UploadConfig } from "./config";
 import { ShareError, type Download, type NewShare, type ShareErrorCode, type ShareService } from "./shares";
 import type { ByteRange } from "./storage/adapter";
+import type { UploadAccess, UploadAccessControl } from "./upload-access";
 
 const TUS_VERSION = "1.0.0";
 const MAX_NAME_LENGTH = 255;
@@ -31,12 +32,56 @@ export function createHttpHandlers({
   shares,
   expiry,
   upload,
+  access,
 }: {
   shares: ShareService;
   expiry: ExpiryConfig;
   upload: UploadConfig;
+  access: UploadAccessControl;
 }) {
+  /** A refusal for a request that may not upload, or null to go ahead. */
+  function refuseUpload(req: Request, respond: (status: number, error: string) => Response): Response | null {
+    const result = access.check(req.headers);
+    if (result === "allowed") return null;
+    return respond(accessStatus[result], ACCESS_ERROR[result]);
+  }
+  const refuseJson = (req: Request) => refuseUpload(req, (status, error) => json(status, { error }));
+  const refuseTus = (req: Request) => refuseUpload(req, (status) => tus(status));
+
   return {
+    /** Whether the request's sender may upload, for the upload page. */
+    uploadAccess(headers: Pick<Headers, "get">): UploadAccess {
+      return access.check(headers);
+    },
+
+    /** Where download pages link to report abuse, or null for no link. */
+    abuseReportUrl() {
+      return access.abuseReportUrl;
+    },
+
+    /** POST /api/upload-session — trades the upload password for a session cookie. */
+    async createUploadSession(req: Request) {
+      const input = await req.json().catch(() => null);
+      const password = isRecord(input) && typeof input.password === "string" ? input.password : null;
+      if (password === null) return json(400, { error: "Invalid request" });
+      const secure = new URL(req.url).protocol === "https:";
+      const result = access.login(req.headers, password, secure);
+      if (result.ok) return new Response(null, { status: 204, headers: { "Set-Cookie": result.cookie, "Cache-Control": "no-store" } });
+      switch (result.reason) {
+        case "wrong":
+          return json(401, { error: "Wrong password" });
+        case "rate_limited":
+          return Response.json(
+            { error: "Too many wrong passwords. Try again later." },
+            { status: 429, headers: { "Retry-After": String(result.retryAfter), "Cache-Control": "no-store" } },
+          );
+        case "network":
+          return json(403, { error: ACCESS_ERROR.network });
+        case "public":
+          return json(404, { error: "Uploads need no password" });
+      }
+    },
+
     /** Choices and settings for the upload form. */
     uploadOptions() {
       return {
@@ -49,6 +94,8 @@ export function createHttpHandlers({
 
     /** POST /api/shares — authorizes and creates a `pending` share. */
     async createShare(req: Request) {
+      const refused = refuseJson(req);
+      if (refused) return refused;
       const newShare = parseNewShare(await req.json().catch(() => null), expiry);
       if (typeof newShare === "string") return json(400, { error: newShare });
       const share = await shares.createShare(newShare);
@@ -73,7 +120,7 @@ export function createHttpHandlers({
 
     /** HEAD /api/uploads/:id — tus offset query. */
     async headUpload(req: Request, uploadId: string) {
-      const rejected = checkTusVersion(req);
+      const rejected = checkTusVersion(req) ?? refuseTus(req);
       if (rejected) return rejected;
       const upload = await shares.getUpload(uploadId);
       if (!upload) return tus(404);
@@ -89,7 +136,7 @@ export function createHttpHandlers({
      * Every chunk must carry its SHA-256 in `Upload-Checksum`.
      */
     async patchUpload(req: Request, uploadId: string) {
-      const rejected = checkTusVersion(req);
+      const rejected = checkTusVersion(req) ?? refuseTus(req);
       if (rejected) return rejected;
       if (req.headers.get("Content-Type") !== "application/offset+octet-stream") return tus(415);
       const offset = parseNonNegativeInt(req.headers.get("Upload-Offset"));
@@ -115,7 +162,9 @@ export function createHttpHandlers({
      * POST /api/shares/:id/finalize — makes the share `ready` and returns its
      * share link and management link, once.
      */
-    async finalize(_req: Request, shareId: string) {
+    async finalize(req: Request, shareId: string) {
+      const refused = refuseJson(req);
+      if (refused) return refused;
       try {
         const { token, managementToken, expiresAt } = await shares.finalize(shareId);
         return json(200, { path: `/d/${token}`, managementPath: `/m/${managementToken}`, expiresAt });
@@ -182,6 +231,13 @@ export function createHttpHandlers({
 }
 
 export type HttpHandlers = ReturnType<typeof createHttpHandlers>;
+
+const accessStatus = { password: 401, network: 403 } as const;
+
+const ACCESS_ERROR = {
+  password: "Enter the upload password to upload. If you already did, your session has ended: reload the page.",
+  network: "Uploads aren't allowed from your network.",
+} as const;
 
 async function serveFile(req: Request, file: Download) {
   const headers = {

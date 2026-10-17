@@ -1,3 +1,4 @@
+import { parseNetworks, type Networks } from "./client-address";
 import { MAX_PART_SIZE, MIN_PART_SIZE } from "./storage/adapter";
 
 type Env = Record<string, string | undefined>;
@@ -118,6 +119,70 @@ function duration(env: Env, name: string, fallback: string): number {
     throw new Error(`Invalid ${name} "${value}": use a whole number of minutes, hours or days, like 30m, 1h or 2d`);
   }
   return Number(match[1]) * DURATION_SECONDS[match[2] as keyof typeof DURATION_SECONDS];
+}
+
+export interface AccessConfig {
+  /** Null when uploads are public. */
+  password: string | null;
+  /** Networks uploads may come from; null allows any. */
+  allowedIps: Networks | null;
+  /** Proxies whose `X-Forwarded-For` is believed. */
+  trustedProxies: Networks | null;
+  /** Where download pages link to report abuse; only set when uploads are public. */
+  abuseReportUrl: string | null;
+}
+
+const EMAIL = /^[^\s@/:]+@[^\s@/]+\.[^\s@/]+$/;
+
+/**
+ * Who may upload; the app needs this, the worker doesn't. Throws on any
+ * invalid value, and when nothing protects uploads.
+ */
+export function loadAccessConfig(env: Env = process.env): AccessConfig {
+  const publicValue = env.ALLOW_PUBLIC_UPLOAD || "false";
+  if (publicValue !== "true" && publicValue !== "false") {
+    throw new Error(`Invalid ALLOW_PUBLIC_UPLOAD "${publicValue}": use true or false`);
+  }
+  const isPublic = publicValue === "true";
+  const password = env.UPLOAD_PASSWORD || null;
+  if (!isPublic && !password) {
+    throw new Error(
+      "Missing UPLOAD_PASSWORD: set an upload password, or set ALLOW_PUBLIC_UPLOAD=true to let anyone upload",
+    );
+  }
+  if (isPublic && password) {
+    throw new Error("UPLOAD_PASSWORD is set but ALLOW_PUBLIC_UPLOAD=true would ignore it: set only one of them");
+  }
+
+  let abuseReportUrl: string | null = null;
+  if (isPublic) {
+    const contact = env.ABUSE_CONTACT?.trim();
+    if (!contact) {
+      throw new Error(
+        "Missing ABUSE_CONTACT: with ALLOW_PUBLIC_UPLOAD=true, download pages link to it so people can report abuse",
+      );
+    }
+    abuseReportUrl = EMAIL.test(contact) ? `mailto:${contact}?subject=${encodeURIComponent("Abuse report")}` : httpUrl(contact);
+    if (!abuseReportUrl) {
+      throw new Error(`Invalid ABUSE_CONTACT "${contact}": use an email address or an http(s) URL`);
+    }
+  }
+
+  return {
+    password,
+    allowedIps: parseNetworks(env.UPLOAD_ALLOWED_IPS, "UPLOAD_ALLOWED_IPS"),
+    trustedProxies: parseNetworks(env.TRUSTED_PROXIES, "TRUSTED_PROXIES"),
+    abuseReportUrl,
+  };
+}
+
+function httpUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 function required(env: Env, name: string): string {

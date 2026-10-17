@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadCleanupConfig, loadConfig, loadExpiryConfig, loadUploadConfig } from "./config";
+import { loadAccessConfig, loadCleanupConfig, loadConfig, loadExpiryConfig, loadUploadConfig } from "./config";
 
 describe("expiry config", () => {
   it("defaults to 1d,3d,7d,14d,30d with 7d preselected", () => {
@@ -105,5 +105,73 @@ describe("cleanup config", () => {
 
   it("rejects an invalid PENDING_TTL", () => {
     expect(() => loadCleanupConfig({ PENDING_TTL: "1 day" })).toThrow(/^Invalid PENDING_TTL "1 day"/);
+  });
+});
+
+describe("access config", () => {
+  it("requires an upload password unless public uploads are turned on", () => {
+    expect(() => loadAccessConfig({})).toThrow(
+      "Missing UPLOAD_PASSWORD: set an upload password, or set ALLOW_PUBLIC_UPLOAD=true to let anyone upload",
+    );
+    expect(() => loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "false" })).toThrow(/^Missing UPLOAD_PASSWORD/);
+    expect(loadAccessConfig({ UPLOAD_PASSWORD: "secret" })).toEqual({
+      password: "secret",
+      allowedIps: null,
+      trustedProxies: null,
+      abuseReportUrl: null,
+    });
+  });
+
+  it.each(["yes", "1", "TRUE"])("rejects ALLOW_PUBLIC_UPLOAD=%s", (value) => {
+    expect(() => loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: value, UPLOAD_PASSWORD: "x" })).toThrow(
+      /^Invalid ALLOW_PUBLIC_UPLOAD/,
+    );
+  });
+
+  it("refuses a password that public uploads would ignore", () => {
+    expect(() =>
+      loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", UPLOAD_PASSWORD: "x", ABUSE_CONTACT: "a@example.com" }),
+    ).toThrow(/set only one of them/);
+  });
+
+  it("needs an abuse contact for public uploads, as an email address or URL", () => {
+    expect(() => loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true" })).toThrow(/^Missing ABUSE_CONTACT/);
+    expect(loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: "abuse@example.com" })).toMatchObject({
+      password: null,
+      abuseReportUrl: "mailto:abuse@example.com?subject=Abuse%20report",
+    });
+    expect(
+      loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: "https://example.com/report" }).abuseReportUrl,
+    ).toBe("https://example.com/report");
+    for (const contact of ["javascript:alert(1)", "not a contact", "ftp://example.com"]) {
+      expect(() => loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: contact }), contact).toThrow(
+        /^Invalid ABUSE_CONTACT/,
+      );
+    }
+  });
+
+  it("reads the allowed networks and trusted proxies", () => {
+    const config = loadAccessConfig({
+      UPLOAD_PASSWORD: "x",
+      UPLOAD_ALLOWED_IPS: "192.168.0.0/16",
+      TRUSTED_PROXIES: "172.16.0.1",
+    });
+    expect(config.allowedIps!.has("192.168.4.4")).toBe(true);
+    expect(config.trustedProxies!.has("172.16.0.1")).toBe(true);
+    expect(() => loadAccessConfig({ UPLOAD_PASSWORD: "x", UPLOAD_ALLOWED_IPS: "office" })).toThrow(
+      /^Invalid UPLOAD_ALLOWED_IPS entry "office"/,
+    );
+  });
+
+  it("isn't needed by the shared config the cleanup worker loads", () => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: "postgres://x",
+        S3_ENDPOINT: "http://x",
+        S3_BUCKET: "b",
+        S3_ACCESS_KEY_ID: "k",
+        S3_SECRET_ACCESS_KEY: "s",
+      }),
+    ).not.toThrow();
   });
 });

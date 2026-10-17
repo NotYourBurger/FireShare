@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
 import type { HttpRequest, HttpResponse, HttpStack } from "tus-js-client";
 import { beforeEach, describe, expect, it } from "vitest";
-import { loadExpiryConfig, loadUploadConfig } from "@/server/config";
+import { loadAccessConfig, loadExpiryConfig, loadUploadConfig } from "@/server/config";
 import { createTestDb } from "@/server/db/test-db";
 import { createHttpHandlers, type HttpHandlers } from "@/server/http";
 import { createShareService } from "@/server/shares";
 import { MIN_PART_SIZE } from "@/server/storage/adapter";
 import { createMemoryStorage } from "@/server/storage/memory";
+import { createUploadAccess } from "@/server/upload-access";
 import { uploadFile } from "./chunked-upload";
 
 const CHUNK = MIN_PART_SIZE;
@@ -19,6 +20,7 @@ beforeEach(async () => {
     shares: createShareService({ db: await createTestDb(), storage: createMemoryStorage() }),
     expiry: loadExpiryConfig({}),
     upload: loadUploadConfig({}),
+    access: createUploadAccess(loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: "abuse@example.com" })),
   });
 });
 
