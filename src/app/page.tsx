@@ -11,10 +11,12 @@ export default async function Home() {
   const access = app.uploadAccess(await headers());
   return (
     <main>
-      <h1>FireShare</h1>
-      <p className="tagline">
-        Upload files and get one link to share them. <a href="/recent">Recent shares</a>
-      </p>
+      <div className="page-header-block">
+        <h1>FireShare</h1>
+        <p className="tagline">
+          Upload files and get one link to share them. <a href="/recent">Recent shares</a>
+        </p>
+      </div>
       {access === "allowed" && <UploadForm {...app.uploadOptions()} />}
       {access === "password" && <UnlockForm />}
       {access === "network" && (

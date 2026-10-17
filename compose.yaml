@@ -1,4 +1,4 @@
-# FireShare: copy .env.example to .env, set the secrets, then `docker compose up`.
+# FireShare: copy .env.example to .env, set the secrets, then `docker compose up -d`.
 
 # Database and storage settings shared by the app and the cleanup worker.
 x-backend-env: &backend-env
@@ -9,10 +9,19 @@ x-backend-env: &backend-env
   S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
   S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
 
+# Every container runs as a non-root user, can't gain privileges (no setuid),
+# holds no Linux capabilities, and has a memory limit.
+x-hardening: &hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
 services:
   app:
+    image: ghcr.io/notyourburger/fireshare:${FIRESHARE_VERSION:-latest}
     build: .
     restart: unless-stopped
+    <<: *hardening
+    mem_limit: 1g
     environment:
       <<: *backend-env
       EXPIRY_OPTIONS: ${EXPIRY_OPTIONS:-}
@@ -40,17 +49,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      storage:
-        condition: service_started
+      storage-init:
+        condition: service_completed_successfully
     networks: [public, internal]
 
   # Deletes expired and deleted shares after DELETE_GRACE, and abandoned
   # uploads after PENDING_TTL. Internal only: it needs no inbound traffic.
   worker:
+    image: ghcr.io/notyourburger/fireshare-worker:${FIRESHARE_VERSION:-latest}
     build:
       context: .
       target: worker
     restart: unless-stopped
+    <<: *hardening
+    mem_limit: 512m
     environment:
       <<: *backend-env
       DELETE_GRACE: ${DELETE_GRACE:-}
@@ -58,8 +70,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      storage:
-        condition: service_started
+      storage-init:
+        condition: service_completed_successfully
       # The app runs the database migrations.
       app:
         condition: service_started
@@ -68,6 +80,10 @@ services:
   db:
     image: postgres:18.1-alpine
     restart: unless-stopped
+    <<: *hardening
+    # The image's postgres user; the data directory is created owned by it.
+    user: postgres
+    mem_limit: 512m
     environment:
       POSTGRES_USER: fireshare
       POSTGRES_DB: fireshare
@@ -82,16 +98,79 @@ services:
     networks: [internal]
 
   # Object storage. Deliberately publishes no ports: the S3 API is reachable
-  # only from the app over the internal network, and the console is off.
+  # only over the internal network, and the console is off. The root key is
+  # used only by storage-init; the app and worker get their own key.
   storage:
     image: rustfs/rustfs:1.0.1
     restart: unless-stopped
+    <<: *hardening
+    mem_limit: 1g
     environment:
-      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
-      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ROOT_ACCESS_KEY:?set RUSTFS_ROOT_ACCESS_KEY in .env}
+      RUSTFS_SECRET_KEY: ${RUSTFS_ROOT_SECRET_KEY:?set RUSTFS_ROOT_SECRET_KEY in .env}
       RUSTFS_CONSOLE_ENABLE: "false"
     volumes:
       - storage-data:/data
+    networks: [internal]
+
+  # Runs on every start, then exits: creates the private bucket, and the app's
+  # key (S3_ACCESS_KEY_ID) with a policy that allows only what FireShare does,
+  # and only in that bucket. Re-running it applies a changed secret or bucket.
+  storage-init:
+    image: rustfs/rc:v0.1.36
+    restart: "no"
+    <<: *hardening
+    mem_limit: 128m
+    environment:
+      ROOT_ACCESS_KEY: ${RUSTFS_ROOT_ACCESS_KEY:?set RUSTFS_ROOT_ACCESS_KEY in .env}
+      ROOT_SECRET_KEY: ${RUSTFS_ROOT_SECRET_KEY:?set RUSTFS_ROOT_SECRET_KEY in .env}
+      APP_ACCESS_KEY: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
+      APP_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
+      BUCKET: ${S3_BUCKET:-fireshare}
+    entrypoint: ["/bin/sh", "-euc"]
+    command:
+      - |
+        if [ "$$APP_ACCESS_KEY" = "$$ROOT_ACCESS_KEY" ]; then
+          echo "S3_ACCESS_KEY_ID must differ from RUSTFS_ROOT_ACCESS_KEY: the app gets its own, limited key" >&2
+          exit 1
+        fi
+        tries=0
+        until rc alias set root http://storage:9000 "$$ROOT_ACCESS_KEY" "$$ROOT_SECRET_KEY" >/dev/null 2>&1; do
+          tries=$$((tries + 1))
+          if [ "$$tries" -ge 60 ]; then
+            echo "Storage didn't accept RUSTFS_ROOT_ACCESS_KEY and RUSTFS_ROOT_SECRET_KEY within 60s" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+
+        rc bucket create --ignore-existing "root/$$BUCKET"
+        rc bucket anonymous set private "root/$$BUCKET"
+
+        cat > /tmp/policy.json <<EOF
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": ["s3:ListBucket", "s3:ListBucketMultipartUploads", "s3:GetBucketLocation", "s3:GetBucketCors", "s3:PutBucketCors"],
+              "Resource": ["arn:aws:s3:::$$BUCKET"]
+            },
+            {
+              "Effect": "Allow",
+              "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+              "Resource": ["arn:aws:s3:::$$BUCKET/*"]
+            }
+          ]
+        }
+        EOF
+        rc admin policy create root fireshare-app /tmp/policy.json
+        rc admin user add root "$$APP_ACCESS_KEY" "$$APP_SECRET_KEY"
+        rc admin policy attach root fireshare-app --user "$$APP_ACCESS_KEY"
+        echo "Storage ready: bucket $$BUCKET is private, and $$APP_ACCESS_KEY can access only it"
+    depends_on:
+      storage:
+        condition: service_started
     networks: [internal]
 
 networks:

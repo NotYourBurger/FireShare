@@ -1,5 +1,6 @@
 "use client";
 
+import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { uploadFile } from "./chunked-upload";
 import { CopyField } from "./copy-field";
@@ -16,6 +17,7 @@ import { addRecentShare } from "./recent-shares";
 // Keep in step with MAX_TITLE_LENGTH and MAX_MESSAGE_LENGTH in src/server/http.ts.
 const MAX_TITLE_LENGTH = 200;
 const MAX_MESSAGE_LENGTH = 5000;
+const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
 type FileStatus = "waiting" | "uploading" | "retrying" | "done" | "failed" | "paused";
 
@@ -55,6 +57,7 @@ export function UploadForm({
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
   const [expiry, setExpiry] = useState(expiryDefault);
+  const [dragging, setDragging] = useState(false);
   const [state, setState] = useState<State>({ step: "select" });
 
   // Offer to resume an upload this browser didn't finish.
@@ -187,12 +190,23 @@ export function UploadForm({
 
   if (state.step === "done") {
     return (
-      <div className="card">
-        <strong>Your link is ready</strong>
+      <motion.div
+        key="done"
+        className="card"
+        initial={{ opacity: 0, y: 18, scale: 0.98, filter: "blur(8px)" }}
+        animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
+        transition={{ duration: 0.65, ease: EASE_OUT_EXPO }}
+      >
+        <div className="step-header">
+          <span className="step-badge">Complete</span>
+          <strong>Your link is ready</strong>
+        </div>
         <CopyField value={state.url} label="Share link" />
         <span className="muted">It expires in {formatExpiry(state.expiry)}.</span>
         <ManagementLink url={state.manageUrl} />
-        <button
+        <motion.button
+          whileHover={{ scale: 1.015, y: -1 }}
+          whileTap={{ scale: 0.985 }}
           onClick={() => {
             setFiles([]);
             setTitle("");
@@ -202,14 +216,23 @@ export function UploadForm({
           }}
         >
           Share more files
-        </button>
-      </div>
+        </motion.button>
+      </motion.div>
     );
   }
 
   if (state.step === "uploading" || state.step === "failed") {
     return (
-      <div className="card">
+      <motion.div
+        key="uploading"
+        className="card"
+        initial={{ opacity: 0, y: 16, filter: "blur(6px)" }}
+        animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+        transition={{ duration: 0.55, ease: EASE_OUT_EXPO }}
+      >
+        <div className="step-header">
+          <span className="step-badge">{state.step === "failed" ? "Interrupted" : "Transferring"}</span>
+        </div>
         <UploadProgress progress={state.progress} />
         {state.step === "failed" && (
           <>
@@ -222,7 +245,7 @@ export function UploadForm({
             </div>
           </>
         )}
-      </div>
+      </motion.div>
     );
   }
 
@@ -230,8 +253,15 @@ export function UploadForm({
     const { pending, offsets, picked } = state;
     const missing = pending.files.filter((file, i) => offsets[i] < file.size && !picked[i]);
     return (
-      <div className="card">
-        <div>
+      <motion.div
+        key="resume"
+        className="card"
+        initial={{ opacity: 0, y: 16, filter: "blur(6px)" }}
+        animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+        transition={{ duration: 0.6, ease: EASE_OUT_EXPO }}
+      >
+        <div className="step-header">
+          <span className="step-badge">Resume upload</span>
           <strong>Finish your upload</strong>
           <p className="muted">
             {missing.length > 0
@@ -239,27 +269,37 @@ export function UploadForm({
               : "An upload from this browser didn't finish. Everything is ready to continue."}
           </p>
         </div>
-        <input
-          type="file"
-          multiple
-          onChange={(e) => {
-            const chosen = Array.from(e.target.files ?? []);
-            e.target.value = "";
-            const matched = matchFiles(pending, chosen);
-            const unknown = chosen.filter((file) => !matched.includes(file));
-            setState({
-              ...state,
-              picked: picked.map((file, i) => matched[i] ?? file),
-              error: unknown.length
-                ? `Not part of this upload, or changed since: ${unknown.map((file) => file.name).join(", ")}`
-                : undefined,
-            });
-          }}
-          aria-label="Select the same files again"
-        />
+        <label className="dropzone">
+          <input
+            type="file"
+            multiple
+            onChange={(e) => {
+              const chosen = Array.from(e.target.files ?? []);
+              e.target.value = "";
+              const matched = matchFiles(pending, chosen);
+              const unknown = chosen.filter((file) => !matched.includes(file));
+              setState({
+                ...state,
+                picked: picked.map((file, i) => matched[i] ?? file),
+                error: unknown.length
+                  ? `Not part of this upload, or changed since: ${unknown.map((file) => file.name).join(", ")}`
+                  : undefined,
+              });
+            }}
+            aria-label="Select the same files again"
+          />
+          <span className="dropzone-plus" aria-hidden="true">
+            +
+          </span>
+          <span className="dropzone-title">Re-select files to resume</span>
+          <span className="dropzone-hint">Resumes from the last verified chunk</span>
+        </label>
         <ul className="files">
           {pending.files.map((file, i) => (
             <li key={i}>
+              <span className="file-index" aria-hidden="true">
+                {String(i + 1).padStart(2, "0")}
+              </span>
               <div className="file-info">
                 <span className="file-name">{file.name}</span>
                 <span className="muted">
@@ -287,73 +327,152 @@ export function UploadForm({
             Discard
           </button>
         </div>
-      </div>
+      </motion.div>
     );
   }
 
+  const totalSelectedBytes = files.reduce((sum, file) => sum + file.size, 0);
+
   return (
-    <div className="card">
-      <input
-        type="file"
-        multiple
-        onChange={(e) => {
-          const picked = Array.from(e.target.files ?? []);
-          setFiles((current) => [...current, ...picked]);
-          e.target.value = "";
+    <motion.div
+      key="select"
+      className="card"
+      initial={{ opacity: 0, y: 18, filter: "blur(6px)" }}
+      animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+      transition={{ duration: 0.65, ease: EASE_OUT_EXPO }}
+    >
+      <motion.label
+        className={`dropzone ${dragging ? "is-dragging" : ""}`}
+        whileHover={{ scale: 1.008, y: -2 }}
+        whileTap={{ scale: 0.994 }}
+        transition={{ type: "spring", stiffness: 360, damping: 24 }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
         }}
-        aria-label="Files to share"
-      />
-      {files.length > 0 && (
-        <ul className="files">
-          {files.map((file, i) => (
-            <li key={i}>
-              <div className="file-info">
-                <span className="file-name">{file.name}</span>
-                <span className="muted">{formatBytes(file.size)}</span>
-              </div>
-              <button
-                className="secondary"
-                onClick={() => setFiles((current) => current.filter((_, j) => j !== i))}
-                aria-label={`Remove ${file.name}`}
-              >
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <label className="field">
-        <span>
-          Title <span className="muted">(optional)</span>
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          const dropped = Array.from(e.dataTransfer?.files ?? []);
+          if (dropped.length > 0) {
+            setFiles((current) => [...current, ...dropped]);
+          }
+        }}
+      >
+        <input
+          type="file"
+          multiple
+          onChange={(e) => {
+            const picked = Array.from(e.target.files ?? []);
+            setFiles((current) => [...current, ...picked]);
+            e.target.value = "";
+          }}
+          aria-label="Files to share"
+        />
+        <motion.span
+          className="dropzone-plus"
+          aria-hidden="true"
+          animate={dragging ? { rotate: 90, scale: 1.15 } : { rotate: 0, scale: 1 }}
+          transition={{ type: "spring", stiffness: 320, damping: 18 }}
+        >
+          +
+        </motion.span>
+        <span className="dropzone-title">Drop files here, or click to browse</span>
+        <span className="dropzone-hint">
+          {files.length > 0
+            ? `${files.length === 1 ? "1 file" : `${files.length} files`} selected · ${formatBytes(totalSelectedBytes)}`
+            : "Resumable chunked transfer · Integrity verified"}
         </span>
-        <input value={title} maxLength={MAX_TITLE_LENGTH} onChange={(e) => setTitle(e.target.value)} />
-      </label>
+      </motion.label>
+
+      <AnimatePresence initial={false}>
+        {files.length > 0 && (
+          <motion.ul
+            className="files"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.35, ease: EASE_OUT_EXPO }}
+          >
+            <AnimatePresence initial={false}>
+              {files.map((file, i) => (
+                <motion.li
+                  key={`${file.name}-${file.size}-${i}`}
+                  initial={{ opacity: 0, x: -12, filter: "blur(4px)" }}
+                  animate={{ opacity: 1, x: 0, filter: "blur(0px)" }}
+                  exit={{ opacity: 0, x: 12, filter: "blur(4px)" }}
+                  transition={{ duration: 0.3, ease: EASE_OUT_EXPO }}
+                >
+                  <span className="file-index" aria-hidden="true">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <div className="file-info">
+                    <span className="file-name">{file.name}</span>
+                    <span className="muted">{formatBytes(file.size)}</span>
+                  </div>
+                  <button
+                    className="secondary"
+                    onClick={() => setFiles((current) => current.filter((_, j) => j !== i))}
+                    aria-label={`Remove ${file.name}`}
+                  >
+                    Remove
+                  </button>
+                </motion.li>
+              ))}
+            </AnimatePresence>
+          </motion.ul>
+        )}
+      </AnimatePresence>
+
+      <div className="fields-grid">
+        <label className="field">
+          <span>
+            Title <span className="muted">(optional)</span>
+          </span>
+          <input
+            value={title}
+            maxLength={MAX_TITLE_LENGTH}
+            placeholder="e.g. Dailies — Scene 04"
+            onChange={(e) => setTitle(e.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>Link expires after</span>
+          <select value={expiry} onChange={(e) => setExpiry(e.target.value)}>
+            {expiryOptions.map((option) => (
+              <option key={option} value={option}>
+                {formatExpiry(option)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
       <label className="field">
         <span>
           Message <span className="muted">(optional)</span>
         </span>
         <textarea
           value={message}
-          rows={3}
+          rows={2}
           maxLength={MAX_MESSAGE_LENGTH}
+          placeholder="Add a note or context for the recipient…"
           onChange={(e) => setMessage(e.target.value)}
         />
       </label>
-      <label className="field">
-        <span>Link expires after</span>
-        <select value={expiry} onChange={(e) => setExpiry(e.target.value)}>
-          {expiryOptions.map((option) => (
-            <option key={option} value={option}>
-              {formatExpiry(option)}
-            </option>
-          ))}
-        </select>
-      </label>
+
       {state.error && <p className="error">Upload failed: {state.error}</p>}
-      <button disabled={files.length === 0} onClick={share}>
+      <motion.button
+        disabled={files.length === 0}
+        onClick={share}
+        whileHover={files.length > 0 ? { scale: 1.012, y: -1 } : undefined}
+        whileTap={files.length > 0 ? { scale: 0.988 } : undefined}
+        transition={{ type: "spring", stiffness: 400, damping: 20 }}
+      >
         Upload and get link
-      </button>
-    </div>
+      </motion.button>
+    </motion.div>
   );
 }
 
@@ -388,7 +507,7 @@ export function UploadProgress({ progress }: { progress: FileProgress[] }) {
   const fraction = total ? sent / total : progress.every((file) => file.status === "done") ? 1 : 0;
   return (
     <>
-      <div>
+      <div className="progress-overview">
         <progress value={fraction} max={1} aria-label="Overall progress" />
         <span className="muted">
           {Math.floor(fraction * 100)}% · {formatBytes(sent)} of {formatBytes(total)}

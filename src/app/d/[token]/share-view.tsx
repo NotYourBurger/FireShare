@@ -16,21 +16,26 @@ export function ShareView({
   const count = share.files.length === 1 ? "1 file" : `${share.files.length} files`;
   return (
     <main>
-      <h1 className="share-title">{share.title ?? "Shared files"}</h1>
-      <p className="tagline">
-        {count} · {formatBytes(total)}
-      </p>
+      <div className="page-heading">
+        <h1 className="share-title">{share.title ?? "Shared files"}</h1>
+        <p className="tagline">
+          {count} · {formatBytes(total)}
+        </p>
+      </div>
       {share.message && <p className="card message">{share.message}</p>}
       {share.downloadAll && share.files.length > 1 && (
-        <p>
+        <div className="download-all-bar">
           <a className="button" href={`/d/${token}/all`}>
             Download all as zip
           </a>
-        </p>
+        </div>
       )}
       <ul className="card files">
-        {share.files.map((file) => (
+        {share.files.map((file, i) => (
           <li key={file.id}>
+            <span className="file-index" aria-hidden="true">
+              {String(i + 1).padStart(2, "0")}
+            </span>
             <div className="file-info">
               <span className="file-name">{file.name}</span>
               <span className="muted">{formatBytes(file.size)}</span>
@@ -54,10 +59,14 @@ export function ShareView({
 export function ShareUnavailable() {
   return (
     <main>
-      <h1>This link is no longer available</h1>
-      <p className="muted">
-        It has expired or the sender deleted it, so its files can&apos;t be downloaded. Ask the sender for a new link.
-      </p>
+      <div className="page-heading">
+        <h1>This link is no longer available</h1>
+      </div>
+      <div className="card">
+        <p className="muted">
+          It has expired or the sender deleted it, so its files can&apos;t be downloaded. Ask the sender for a new link.
+        </p>
+      </div>
     </main>
   );
 }

@@ -21,12 +21,14 @@ export function ManageView({ token, share }: { token: string; share: ManagedShar
   const count = share.files.length === 1 ? "1 file" : `${share.files.length} files`;
   return (
     <main>
-      <h1 className="share-title">{share.title ?? "Shared files"}</h1>
-      <p className="tagline">
-        {count} · {formatBytes(total)}
-      </p>
+      <div className="page-heading">
+        <h1 className="share-title">{share.title ?? "Shared files"}</h1>
+        <p className="tagline">
+          {count} · {formatBytes(total)}
+        </p>
+      </div>
       <div className="card">
-        <p>
+        <p className="status-row">
           <span className="status" data-status={share.status}>
             {STATUS_LABEL[share.status]}
           </span>{" "}
@@ -55,8 +57,11 @@ export function ManageView({ token, share }: { token: string; share: ManagedShar
       </div>
       {share.message && <p className="card message">{share.message}</p>}
       <ul className="card files">
-        {share.files.map((file) => (
+        {share.files.map((file, i) => (
           <li key={file.id}>
+            <span className="file-index" aria-hidden="true">
+              {String(i + 1).padStart(2, "0")}
+            </span>
             <div className="file-info">
               <span className="file-name">{file.name}</span>
               <span className="muted">{formatBytes(file.size)}</span>

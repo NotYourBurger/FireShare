@@ -2,7 +2,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { formatBytes } from "../app/format";
 import { createCleanup, type CleanupReport } from "../server/cleanup";
-import { loadConfig } from "../server/config";
+import { ConfigError, describeConfigProblems, loadConfig } from "../server/config";
 import { schema, type Database } from "../server/db";
 import { createS3Storage } from "../server/storage/s3";
 
@@ -11,7 +11,15 @@ const INTERVAL_MS = 5 * 60 * 1000;
 
 // The cleanup worker: a separate process that reclaims storage on a schedule.
 // The app migrates the database; until it has, runs fail, log, and retry.
-const config = loadConfig();
+const config = (() => {
+  try {
+    return loadConfig();
+  } catch (err) {
+    if (!(err instanceof ConfigError)) throw err;
+    console.error(describeConfigProblems("The cleanup worker", err.problems));
+    process.exit(1);
+  }
+})();
 const pool = new Pool({ connectionString: config.databaseUrl });
 const cleanup = createCleanup({
   db: drizzle(pool, { schema }) as unknown as Database,
