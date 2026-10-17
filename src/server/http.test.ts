@@ -657,3 +657,116 @@ describe("Range header parsing", () => {
     expect(parseRange(header, size)).toEqual(expected);
   });
 });
+
+describe("direct transfer mode", () => {
+  let memStorage: ReturnType<typeof createMemoryStorage>;
+  let directHttp: HttpHandlers;
+
+  beforeEach(async () => {
+    clock = new Date("2026-01-01T00:00:00Z");
+    memStorage = createMemoryStorage({ now: () => clock });
+    const shares = createShareService({
+      db: await createTestDb(),
+      storage: memStorage,
+      now: () => clock,
+    });
+    directHttp = createHttpHandlers({
+      shares,
+      expiry: loadExpiryConfig({ EXPIRY_OPTIONS: "12h,1d,7d", EXPIRY_DEFAULT: "1d" }),
+      upload: loadUploadConfig({ UPLOAD_CHUNK_SIZE: "5MB", UPLOAD_PARALLEL_FILES: "2" }),
+      access: createUploadAccess(loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: "abuse@example.com" })),
+      transfer: { mode: "direct", directEndpoint: "https://storage.local:9000", appOrigin: null },
+      ensureCors: (o) => memStorage.ensureCors(o),
+    });
+  });
+
+  it("uploads directly to storage via presigned part URLs, resumes, and redirects single-file downloads", async () => {
+    const size = MIN_PART_SIZE + 4;
+    const createRes = await directHttp.createShare(
+      new Request(`${origin}/api/shares`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Direct share",
+          files: [
+            { name: "clip.mov", size, type: "video/quicktime" },
+            { name: "empty.txt", size: 0, type: "text/plain" },
+          ],
+        }),
+      }),
+    );
+    expect(createRes.status).toBe(201);
+    expect(memStorage.corsOrigins()).toEqual([origin]);
+
+    const created = await createRes.json();
+    expect(created.files[0].partUrls).toHaveLength(2);
+    expect(created.files[1].partUrls).toEqual([]);
+
+    // Proxied PATCH is refused in direct mode.
+    const patchRes = await directHttp.patchUpload(
+      new Request(`${origin}/api/uploads/${created.files[0].id}`, {
+        method: "PATCH",
+        headers: { "Tus-Resumable": "1.0.0", "Content-Type": "application/offset+octet-stream" },
+      }),
+      created.files[0].id,
+    );
+    expect(patchRes.status).toBe(405);
+
+    // Upload part 1 directly to storage.
+    const part1 = Buffer.alloc(MIN_PART_SIZE, 0x42);
+    expect(
+      (await memStorage.fetch(new Request(created.files[0].partUrls[0], { method: "PUT", body: part1 }))).status,
+    ).toBe(200);
+
+    // Resume via GET /api/uploads/:id returns offset and only the remaining part URL.
+    const resumeRes = await directHttp.getUpload(
+      new Request(`${origin}/api/uploads/${created.files[0].id}`),
+      created.files[0].id,
+    );
+    expect(resumeRes.status).toBe(200);
+    const resumed = await resumeRes.json();
+    expect(resumed.offset).toBe(MIN_PART_SIZE);
+    expect(resumed.partUrls).toHaveLength(1);
+
+    // Upload part 2 and finalize.
+    const part2 = Buffer.from("tail");
+    expect(
+      (await memStorage.fetch(new Request(resumed.partUrls[0], { method: "PUT", body: part2 }))).status,
+    ).toBe(200);
+
+    const finRes = await directHttp.finalize(
+      new Request(`${origin}/api/shares/${created.id}/finalize`, { method: "POST" }),
+      created.id,
+    );
+    expect(finRes.status).toBe(200);
+    const { path } = await finRes.json();
+    const token = path.slice("/d/".length);
+
+    // Single-file download redirects (302) to a short-lived presigned GET URL with Content-Disposition.
+    const dlRes = await directHttp.download(
+      new Request(`${origin}${path}/files/${created.files[0].id}`),
+      token,
+      created.files[0].id,
+    );
+    expect(dlRes.status).toBe(302);
+    expect(dlRes.headers.get("Cache-Control")).toBe("private, no-store");
+    const location = dlRes.headers.get("Location")!;
+    expect(location).toBeTruthy();
+
+    const storageGet = await memStorage.fetch(new Request(location));
+    expect(storageGet.status).toBe(200);
+    expect(storageGet.headers.get("Content-Disposition")).toContain("clip.mov");
+    expect(Buffer.from(await storageGet.arrayBuffer()).equals(Buffer.concat([part1, part2]))).toBe(true);
+
+    // Download all streams a store-only ZIP without Range or Content-Length.
+    const zipRes = await directHttp.downloadAll(new Request(`${origin}${path}/all`), token);
+    expect(zipRes.status).toBe(200);
+    expect(zipRes.headers.get("Accept-Ranges")).toBeNull();
+    expect(zipRes.headers.get("Content-Length")).toBeNull();
+    const entries = await unzip(Buffer.from(await zipRes.arrayBuffer()));
+    expect(entries.map((e) => [e.name, e.size])).toEqual([
+      ["clip.mov", size],
+      ["empty.txt", 0],
+    ]);
+  });
+});

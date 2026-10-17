@@ -4,10 +4,10 @@ import type { UploadedPart } from "../storage/adapter";
 /** One received chunk: the storage part it became, plus its integrity data. */
 export interface FilePart extends UploadedPart {
   size: number;
-  /** Hex SHA-256 sent by the browser and checked before the part was written. */
-  sha256: string;
-  /** Computed as the chunk streamed through; combined, they give the file's CRC32. */
-  crc32: number;
+  /** Hex SHA-256 sent by the browser and checked before the part was written (proxied mode). */
+  sha256?: string;
+  /** Computed as the chunk streamed through; combined, they give the file's CRC32 (proxied mode). */
+  crc32?: number;
 }
 
 export const shares = pgTable(

@@ -5,6 +5,10 @@ export interface UploadedPart {
   etag: string;
 }
 
+export interface StoredPart extends UploadedPart {
+  size: number;
+}
+
 export interface ObjectInfo {
   size: number;
   etag: string;
@@ -22,6 +26,23 @@ export interface ReadOptions {
   /** Refuse with {@link ObjectChangedError} unless the object still has this ETag. */
   ifMatch?: string;
 }
+
+/** A single-action, single-key operation a browser may perform directly against storage. */
+export type PresignedUrlRequest =
+  | {
+      action: "uploadPart";
+      key: string;
+      uploadId: string;
+      partNumber: number;
+      expiresInSeconds?: number;
+    }
+  | {
+      action: "getObject";
+      key: string;
+      expiresInSeconds?: number;
+      responseContentDisposition?: string;
+      responseContentType?: string;
+    };
 
 /** The object no longer has the ETag a read was made against. */
 export class ObjectChangedError extends Error {
@@ -49,6 +70,8 @@ export interface StorageAdapter {
     body: Readable,
     length: number,
   ): Promise<UploadedPart>;
+  /** Parts uploaded so far for `uploadId`, in ascending `partNumber` order, or `[]` when the upload doesn't exist. */
+  listParts(key: string, uploadId: string): Promise<StoredPart[]>;
   completeUpload(key: string, uploadId: string, parts: UploadedPart[]): Promise<void>;
   /**
    * Discards an incomplete multipart upload and its parts. Succeeds when the
@@ -56,14 +79,22 @@ export interface StorageAdapter {
    */
   abortUpload(key: string, uploadId: string): Promise<void>;
   getReadStream(key: string, options?: ReadOptions): Promise<Readable>;
+  /** Issues a short-lived URL signed for one storage key and one action. */
+  getPresignedUrl(request: PresignedUrlRequest): Promise<string>;
+  /** Restricts the bucket's CORS rules to `origin` only. */
+  ensureCors?(origin: string): Promise<void>;
   /** Returns null when the object doesn't exist. */
   head(key: string): Promise<ObjectInfo | null>;
   /** Succeeds when the object doesn't exist. */
   delete(key: string): Promise<void>;
 }
 
+/** How long a presigned URL works before storage rejects it. */
+export const PRESIGN_TTL_SECONDS = 5 * 60;
+
 /** S3's minimum size for every multipart part except the last. */
 export const MIN_PART_SIZE = 5 * 1024 * 1024;
 
 /** S3's maximum size for any multipart part. */
 export const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
+

@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { crc32 } from "node:zlib";
 import type { ByteRange } from "./storage/adapter";
 
 /** One file in a zip, with its CRC32 known up front. */
@@ -6,6 +7,12 @@ export interface ZipEntry {
   name: string;
   size: number;
   crc32: number;
+}
+
+/** One file in a streaming zip whose CRC32 is computed as its bytes pass through. */
+export interface StreamingZipEntry {
+  name: string;
+  size: number;
 }
 
 export interface ZipArchive {
@@ -136,6 +143,120 @@ async function* readSegments(segments: Segment[], range: ByteRange, openEntry: O
 }
 
 /**
+ * Streams a store-only ZIP archive when entry CRC32s are not known up front
+ * (e.g., direct-mode uploads before the background CRC32 worker runs). Uses
+ * ZIP Data Descriptors (general-purpose bit 3) so each file's CRC32 is
+ * computed as its bytes stream through and written immediately after the entry
+ * data and in the trailing Central Directory.
+ */
+export function createStreamingZip(entries: StreamingZipEntry[], modified: Date, openEntry: OpenEntry): Readable {
+  return Readable.from(streamEntries(entries, modified, openEntry));
+}
+
+async function* streamEntries(entries: StreamingZipEntry[], modified: Date, openEntry: OpenEntry) {
+  const { time, date } = dosDateTime(modified);
+  const central: Buffer[] = [];
+  let offset = 0;
+
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    const name = Buffer.from(entry.name, "utf8");
+    const headerOffset = offset;
+    const large = entry.size >= MAX32;
+    const version = large || headerOffset >= MAX32 ? VERSION_ZIP64 : VERSION_DEFAULT;
+    const flags = FLAG_UTF8 | FLAG_DATA_DESCRIPTOR;
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(version, 4);
+    local.writeUInt16LE(flags, 6);
+    local.writeUInt16LE(METHOD_STORE, 8);
+    local.writeUInt16LE(time, 10);
+    local.writeUInt16LE(date, 12);
+    // With bit 3 set, CRC32 and sizes in the local header are 0 and follow in the data descriptor.
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    const localHeader = Buffer.concat([local, name]);
+    yield localHeader;
+    offset += localHeader.length;
+
+    let entryCrc = 0;
+    if (entry.size > 0) {
+      const stream = await openEntry(index, { start: 0, end: entry.size - 1 });
+      for await (const raw of stream) {
+        const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+        entryCrc = crc32(chunk, entryCrc);
+        offset += chunk.length;
+        yield chunk;
+      }
+    }
+
+    const descriptor = Buffer.alloc(large ? 24 : 16);
+    descriptor.writeUInt32LE(0x08074b50, 0);
+    descriptor.writeUInt32LE(entryCrc >>> 0, 4);
+    if (large) {
+      descriptor.writeBigUInt64LE(BigInt(entry.size), 8);
+      descriptor.writeBigUInt64LE(BigInt(entry.size), 16);
+    } else {
+      descriptor.writeUInt32LE(entry.size, 8);
+      descriptor.writeUInt32LE(entry.size, 12);
+    }
+    yield descriptor;
+    offset += descriptor.length;
+
+    const overflowed = [...(large ? [entry.size, entry.size] : []), ...(headerOffset >= MAX32 ? [headerOffset] : [])];
+    const centralExtra = overflowed.length > 0 ? zip64Extra(overflowed) : EMPTY;
+    const header = Buffer.alloc(46);
+    header.writeUInt32LE(0x02014b50, 0);
+    header.writeUInt16LE(VERSION_ZIP64, 4);
+    header.writeUInt16LE(version, 6);
+    header.writeUInt16LE(flags, 8);
+    header.writeUInt16LE(METHOD_STORE, 10);
+    header.writeUInt16LE(time, 12);
+    header.writeUInt16LE(date, 14);
+    header.writeUInt32LE(entryCrc >>> 0, 16);
+    header.writeUInt32LE(large ? MAX32 : entry.size, 20);
+    header.writeUInt32LE(large ? MAX32 : entry.size, 24);
+    header.writeUInt16LE(name.length, 28);
+    header.writeUInt16LE(centralExtra.length, 30);
+    header.writeUInt32LE(Math.min(headerOffset, MAX32), 42);
+    central.push(header, name, centralExtra);
+  }
+
+  const directory = Buffer.concat(central);
+  const directoryOffset = offset;
+  yield directory;
+  offset += directory.length;
+
+  const count = entries.length;
+  const needsZip64 = count >= MAX16 || directory.length >= MAX32 || directoryOffset >= MAX32;
+  if (needsZip64) {
+    const zip64EndOffset = offset;
+    const end64 = Buffer.alloc(56 + 20);
+    end64.writeUInt32LE(0x06064b50, 0);
+    end64.writeBigUInt64LE(44n, 4);
+    end64.writeUInt16LE(VERSION_ZIP64, 12);
+    end64.writeUInt16LE(VERSION_ZIP64, 14);
+    end64.writeBigUInt64LE(BigInt(count), 24);
+    end64.writeBigUInt64LE(BigInt(count), 32);
+    end64.writeBigUInt64LE(BigInt(directory.length), 40);
+    end64.writeBigUInt64LE(BigInt(directoryOffset), 48);
+    end64.writeUInt32LE(0x07064b50, 56);
+    end64.writeBigUInt64LE(BigInt(zip64EndOffset), 64);
+    end64.writeUInt32LE(1, 72);
+    yield end64;
+    offset += end64.length;
+  }
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(Math.min(count, MAX16), 8);
+  end.writeUInt16LE(Math.min(count, MAX16), 10);
+  end.writeUInt32LE(Math.min(directory.length, MAX32), 12);
+  end.writeUInt32LE(Math.min(directoryOffset, MAX32), 16);
+  yield end;
+}
+
+/**
  * Names for the files inside a zip: path separators and characters Windows
  * or macOS can't store are replaced, so every entry extracts as one plain
  * file, and duplicates (ignoring case and Unicode normalization, as those
@@ -179,6 +300,8 @@ const MAX16 = 0xffff;
 const MAX32 = 0xffffffff;
 const VERSION_DEFAULT = 20;
 const VERSION_ZIP64 = 45;
+/** General-purpose bit 3: CRC32 and sizes follow the entry in a data descriptor. */
+const FLAG_DATA_DESCRIPTOR = 0x0008;
 /** General-purpose bit 11: names are UTF-8. */
 const FLAG_UTF8 = 0x0800;
 const METHOD_STORE = 0;

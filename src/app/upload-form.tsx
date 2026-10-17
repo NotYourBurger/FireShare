@@ -30,6 +30,7 @@ interface FileProgress {
 interface Job {
   pending: PendingUpload;
   files: (File | null)[];
+  partUrls?: (string[] | undefined)[];
 }
 
 type State =
@@ -97,10 +98,12 @@ export function UploadForm({
       setState({ step: "select", error: errorMessage(err) });
       return;
     }
+    const direct = Array.isArray(created.files[0]?.partUrls);
     const pending: PendingUpload = {
       shareId: created.id,
       expiry,
       title: title.trim() || null,
+      ...(direct ? { direct: true } : {}),
       files: files.map((file, i) => ({
         name: file.name,
         size: file.size,
@@ -109,7 +112,11 @@ export function UploadForm({
       })),
     };
     savePendingUpload(pending);
-    await run({ pending, files });
+    await run({
+      pending,
+      files,
+      partUrls: direct ? created.files.map((f: { partUrls?: string[] }) => f.partUrls) : undefined,
+    });
   }
 
   /** Uploads every file of the job that hasn't fully arrived, then finalizes the share. */
@@ -136,6 +143,8 @@ export function UploadForm({
         try {
           await uploadFile(job.files[i]!, job.pending.files[i].uploadUrl, {
             chunkSize,
+            direct: job.pending.direct,
+            partUrls: job.partUrls?.[i],
             signal: abort.signal,
             onProgress: (sent) => update(i, { sent }),
             onRetry: () => update(i, { status: "retrying" }),
@@ -162,7 +171,12 @@ export function UploadForm({
       const stopped = progress.map((file) =>
         file.status === "done" || file.status === "failed" ? file : { ...file, status: "paused" as const },
       );
-      setState({ step: "failed", job, progress: stopped, message: errorMessage(err) });
+      setState({
+        step: "failed",
+        job: { pending: job.pending, files: job.files },
+        progress: stopped,
+        message: errorMessage(err),
+      });
     }
   }
 

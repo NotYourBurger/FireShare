@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { HttpRequest, HttpResponse, HttpStack } from "tus-js-client";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadAccessConfig, loadExpiryConfig, loadUploadConfig } from "@/server/config";
 import { createTestDb } from "@/server/db/test-db";
 import { createHttpHandlers, type HttpHandlers } from "@/server/http";
@@ -183,5 +183,113 @@ describe("chunked upload", () => {
     await expect(
       uploadFile(new Blob([data]), `${origin}/api/uploads/${crypto.randomUUID()}`, { chunkSize: CHUNK, httpStack: stack }),
     ).rejects.toThrow();
+  });
+});
+
+describe("direct chunked upload", () => {
+  const data = randomBytes(CHUNK * 2 + 1234);
+  let memStorage: ReturnType<typeof createMemoryStorage>;
+  let directHttp: HttpHandlers;
+
+  beforeEach(async () => {
+    memStorage = createMemoryStorage();
+    directHttp = createHttpHandlers({
+      shares: createShareService({ db: await createTestDb(), storage: memStorage }),
+      expiry: loadExpiryConfig({}),
+      upload: loadUploadConfig({ UPLOAD_CHUNK_SIZE: "5MB" }),
+      access: createUploadAccess(loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: "abuse@example.com" })),
+      transfer: { mode: "direct", directEndpoint: "https://storage.local:9000", appOrigin: null },
+      ensureCors: (o) => memStorage.ensureCors(o),
+    });
+  });
+
+  function directFetch(failPart?: (partNumber: number) => boolean): {
+    fetchFn: typeof globalThis.fetch;
+    putParts: number[];
+  } {
+    const putParts: number[] = [];
+    const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const parsed = new URL(url);
+      if (parsed.origin === origin) {
+        const id = parsed.pathname.split("/").pop()!;
+        return directHttp.getUpload(new Request(url, init), id);
+      }
+      const partNumber = Number(parsed.searchParams.get("partNumber"));
+      putParts.push(partNumber);
+      if (failPart?.(partNumber)) {
+        throw new Error("Connection reset");
+      }
+      const body = init?.body instanceof Blob ? new Uint8Array(await init.body.arrayBuffer()) : undefined;
+      return memStorage.fetch(new Request(url, { method: init?.method ?? "GET", body }));
+    }) as typeof globalThis.fetch;
+    return { fetchFn, putParts };
+  }
+
+  it("uploads parts directly to storage without browser hashing", async () => {
+    const createRes = await directHttp.createShare(
+      new Request(`${origin}/api/shares`, {
+        method: "POST",
+        body: JSON.stringify({ files: [{ name: "plate.exr", size: data.length }] }),
+      }),
+    );
+    const { id: shareId, files } = await createRes.json();
+    const file = files[0];
+    const digestSpy = vi.spyOn(globalThis.crypto.subtle, "digest");
+    const { fetchFn, putParts } = directFetch();
+    let progress = 0;
+
+    await uploadFile(new Blob([data]), `${origin}${file.uploadUrl}`, {
+      chunkSize: CHUNK,
+      direct: true,
+      partUrls: file.partUrls,
+      fetch: fetchFn,
+      onProgress: (bytes) => (progress = bytes),
+    });
+
+    expect(digestSpy).not.toHaveBeenCalled();
+    digestSpy.mockRestore();
+    expect(putParts).toEqual([1, 2, 3]);
+    expect(progress).toBe(data.length);
+
+    const finRes = await directHttp.finalize(new Request(`${origin}/api/shares/${shareId}/finalize`), shareId);
+    expect(finRes.status).toBe(200);
+  });
+
+  it("resumes an interrupted direct upload from the last completed part", async () => {
+    const createRes = await directHttp.createShare(
+      new Request(`${origin}/api/shares`, {
+        method: "POST",
+        body: JSON.stringify({ files: [{ name: "plate.exr", size: data.length }] }),
+      }),
+    );
+    const { id: shareId, files } = await createRes.json();
+    const file = files[0];
+    const uploadUrl = `${origin}${file.uploadUrl}`;
+
+    // First attempt fails on part 2.
+    const first = directFetch((partNumber) => partNumber === 2);
+    await expect(
+      uploadFile(new Blob([data]), uploadUrl, {
+        chunkSize: CHUNK,
+        direct: true,
+        partUrls: file.partUrls,
+        fetch: first.fetchFn,
+        retryDelays: [],
+      }),
+    ).rejects.toThrow();
+    expect(first.putParts).toEqual([1, 2]);
+
+    // Resume queries GET /api/uploads/:id and uploads only parts 2 and 3.
+    const second = directFetch();
+    await uploadFile(new Blob([data]), uploadUrl, {
+      chunkSize: CHUNK,
+      direct: true,
+      fetch: second.fetchFn,
+    });
+    expect(second.putParts).toEqual([2, 3]);
+
+    const finRes = await directHttp.finalize(new Request(`${origin}/api/shares/${shareId}/finalize`), shareId);
+    expect(finRes.status).toBe(200);
   });
 });

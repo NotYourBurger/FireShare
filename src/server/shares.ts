@@ -9,10 +9,11 @@ import {
   ObjectChangedError,
   type ByteRange,
   type StorageAdapter,
+  type StoredPart,
   type UploadedPart,
 } from "./storage/adapter";
 import { generateToken, hashToken } from "./tokens";
-import { createZip, safeFileName, zipEntryNames } from "./zip";
+import { createStreamingZip, createZip, safeFileName, zipEntryNames } from "./zip";
 
 const { shares, files } = schema;
 
@@ -63,22 +64,34 @@ export interface SharePage {
   title: string | null;
   message: string | null;
   files: SharedFile[];
-  /** Whether every file's CRC32 is known, so Download all can be offered. */
+  /** Whether Download all can be offered for this share. */
   downloadAll: boolean;
 }
 
-export interface Download {
+export interface ArchiveDownload {
   name: string;
-  size: number;
+  /** Exact archive size when every file's CRC32 is known up front, or null when streamed with data descriptors. */
+  size: number | null;
   contentType: string;
+  /** Strong validator when the archive layout is fixed up front, or null when streamed with data descriptors. */
+  etag: string | null;
+  /**
+   * Streams the archive, or just `range` of it when `size` is known, from the
+   * objects whose fingerprints were checked. Throws a `tampered` ShareError if
+   * any object changed since.
+   */
+  read(range?: ByteRange): Promise<Readable>;
+}
+
+export interface Download extends ArchiveDownload {
+  size: number;
   /** Strong validator for the file's content, quoted as an HTTP ETag. */
   etag: string;
   /**
-   * Streams the file, or just `range` of it, from the object whose
-   * fingerprint was checked. Throws a `tampered` ShareError if the object
-   * changed since.
+   * Short-lived presigned URL to read this file directly from storage with
+   * the given Content-Disposition header.
    */
-  read(range?: ByteRange): Promise<Readable>;
+  presign(contentDisposition: string): Promise<string>;
 }
 
 /** Where a finalized share stands: serving, past its expiry, or deleted early by the uploader. */
@@ -122,10 +135,35 @@ const QUOTA_WINDOW_SECONDS = 86400;
 type ShareRow = typeof shares.$inferSelect;
 type FileRow = typeof files.$inferSelect;
 
-/** The file's CRC32 from its chunks', or null for files uploaded before CRC32s were recorded. */
+/** The file's CRC32 from its chunks', or null for files without per-chunk CRC32s. */
 function fileCrc32(file: FileRow): number | null {
+  if (file.size > 0 && file.parts.length === 0) return null;
   if (file.parts.some((part) => typeof part.crc32 !== "number")) return null;
-  return combineCrc32(file.parts);
+  return combineCrc32(file.parts as { size: number; crc32: number }[]);
+}
+
+/**
+ * Inspects the parts already uploaded to storage for a direct-mode file and
+ * returns the contiguous valid byte offset starting from part 1.
+ */
+function contiguousProgress(storedParts: StoredPart[], fileSize: number, chunkSize?: number) {
+  let offset = 0;
+  let completedParts = 0;
+  for (let i = 0; i < storedParts.length && offset < fileSize; i++) {
+    const partNumber = i + 1;
+    const part = storedParts[i];
+    if (part.partNumber !== partNumber) break;
+    if (chunkSize !== undefined) {
+      const expectedSize = Math.min(chunkSize, fileSize - offset);
+      if (part.size !== expectedSize) break;
+    } else {
+      if (offset + part.size > fileSize) break;
+      if (offset + part.size < fileSize && part.size < MIN_PART_SIZE) break;
+    }
+    offset += part.size;
+    completedParts = partNumber;
+  }
+  return { offset, completedParts };
 }
 
 function tampered(fileId: string, detail: string): ShareError {
@@ -320,9 +358,43 @@ export function createShareService({
     },
 
     /** Upload progress of a file in a `pending` share, or null. */
-    async getUpload(fileId: string) {
+    async getUpload(fileId: string, chunkSize?: number) {
       const file = await findPendingFile(fileId);
-      return file ? { size: file.size, offset: file.uploadOffset } : null;
+      if (!file) return null;
+      if (file.uploadOffset > 0 || file.size === 0 || file.parts.length > 0) {
+        return { size: file.size, offset: file.uploadOffset };
+      }
+      const storedParts = await storage.listParts(file.storageKey, file.multipartUploadId);
+      const { offset } = contiguousProgress(storedParts, file.size, chunkSize);
+      return { size: file.size, offset };
+    },
+
+    /**
+     * Upload progress and short-lived presigned part URLs for the remaining
+     * parts of a file in a `pending` share, or null. Signs only as many
+     * `uploadPart` URLs as the remaining bytes require.
+     */
+    async getDirectUpload(fileId: string, chunkSize: number) {
+      const file = await findPendingFile(fileId);
+      if (!file) return null;
+      if (file.size === 0) {
+        return { size: 0, offset: 0, partUrls: [] as string[] };
+      }
+      const storedParts = await storage.listParts(file.storageKey, file.multipartUploadId);
+      const { offset, completedParts } = contiguousProgress(storedParts, file.size, chunkSize);
+      const totalParts = Math.ceil(file.size / chunkSize);
+      const partUrls: string[] = [];
+      for (let partNumber = completedParts + 1; partNumber <= totalParts; partNumber++) {
+        partUrls.push(
+          await storage.getPresignedUrl({
+            action: "uploadPart",
+            key: file.storageKey,
+            uploadId: file.multipartUploadId,
+            partNumber,
+          }),
+        );
+      }
+      return { size: file.size, offset, partUrls };
     },
 
     /**
@@ -373,7 +445,7 @@ export function createShareService({
      * returns the share token and the management token, once. If any file can't be completed the share stays `pending`, and a
      * later call picks up where this one stopped.
      */
-    async finalize(shareId: string) {
+    async finalize(shareId: string, chunkSize?: number) {
       const share = isUuid(shareId)
         ? await db.query.shares.findFirst({
             where: and(eq(shares.id, shareId), eq(shares.status, "pending")),
@@ -382,26 +454,80 @@ export function createShareService({
       if (!share) throw new ShareError("not_found", "No such pending share");
 
       const shareFiles = await filesOf(shareId);
-      if (shareFiles.length === 0 || shareFiles.some((file) => file.uploadOffset !== file.size)) {
+      if (shareFiles.length === 0) {
         throw new ShareError("not_finalizable", "Not every file has finished uploading");
       }
+
+      const resolvedParts = new Map<string, schema.FilePart[]>();
+      for (const file of shareFiles) {
+        if (file.completedAt || file.size === 0) continue;
+        if (file.parts.length > 0) {
+          if (file.uploadOffset !== file.size) {
+            throw new ShareError("not_finalizable", "Not every file has finished uploading");
+          }
+          resolvedParts.set(file.id, file.parts);
+          continue;
+        }
+        const storedParts = await storage.listParts(file.storageKey, file.multipartUploadId);
+        if (storedParts.length === 0) {
+          throw new ShareError("not_finalizable", "Not every file has finished uploading");
+        }
+        const totalSize = storedParts.reduce((sum, part) => sum + part.size, 0);
+        const contiguous = storedParts.every((part, i) => part.partNumber === i + 1);
+        const validNonFinalSizes = storedParts
+          .slice(0, -1)
+          .every((part) => (chunkSize !== undefined ? part.size === chunkSize : part.size >= MIN_PART_SIZE));
+        if (contiguous && validNonFinalSizes && totalSize < file.size) {
+          const lastSize = storedParts[storedParts.length - 1].size;
+          const isInProgressPrefix =
+            chunkSize !== undefined ? lastSize === chunkSize : lastSize >= MIN_PART_SIZE;
+          if (isInProgressPrefix) {
+            throw new ShareError("not_finalizable", "Not every file has finished uploading");
+          }
+        }
+        if (!contiguous || !validNonFinalSizes || totalSize !== file.size) {
+          await storage.abortUpload(file.storageKey, file.multipartUploadId);
+          await storage.delete(file.storageKey);
+          throw new ShareError(
+            "invalid_chunk",
+            `Stored object for file ${file.id} is ${totalSize}, not ${file.size} bytes`,
+          );
+        }
+        resolvedParts.set(file.id, storedParts);
+      }
+
       for (const file of shareFiles) {
         if (file.completedAt) continue;
-        let parts: UploadedPart[] = file.parts;
+        let partsToComplete: UploadedPart[];
+        let partsForDb: schema.FilePart[];
         if (file.size === 0) {
           // A multipart upload needs at least one part, even an empty one.
-          parts = [await storage.writePart(file.storageKey, file.multipartUploadId, 1, Readable.from([]), 0)];
+          partsToComplete = [await storage.writePart(file.storageKey, file.multipartUploadId, 1, Readable.from([]), 0)];
+          partsForDb = file.parts;
+        } else {
+          partsForDb = resolvedParts.get(file.id)!;
+          partsToComplete = partsForDb;
         }
-        await storage.completeUpload(file.storageKey, file.multipartUploadId, parts);
+        await storage.completeUpload(file.storageKey, file.multipartUploadId, partsToComplete);
         const stored = await storage.head(file.storageKey);
         if (stored?.size !== file.size) {
-          throw new Error(`Stored object for file ${file.id} is ${stored?.size ?? "missing"}, not ${file.size} bytes`);
+          await storage.delete(file.storageKey);
+          throw new ShareError(
+            "invalid_chunk",
+            `Stored object for file ${file.id} is ${stored?.size ?? "missing"}, not ${file.size} bytes`,
+          );
         }
+        const hasChunkHashes =
+          file.size === 0 || (partsForDb.length > 0 && partsForDb.every((part) => typeof part.sha256 === "string"));
         await db
           .update(files)
           .set({
+            uploadOffset: file.size,
+            parts: partsForDb,
             completedAt: now(),
-            fingerprintHash: chunkHashesFingerprint(file.parts.map((part) => part.sha256)),
+            fingerprintHash: hasChunkHashes
+              ? chunkHashesFingerprint(partsForDb.map((part) => part.sha256!))
+              : null,
             fingerprintEtag: stored.etag,
           })
           .where(and(eq(files.id, file.id), isNull(files.completedAt)));
@@ -435,7 +561,7 @@ export function createShareService({
         title: share.title,
         message: share.message,
         files: shareFiles.map(({ id, name, size }) => ({ id, name, size })),
-        downloadAll: shareFiles.every((file) => fileCrc32(file) !== null),
+        downloadAll: true,
       };
     },
 
@@ -462,34 +588,56 @@ export function createShareService({
         contentType: file.contentType,
         etag: `"${file.fingerprintHash ?? file.id}"`,
         read: (range) => readChecked(file, etag, range),
+        presign: (contentDisposition) =>
+          storage.getPresignedUrl({
+            action: "getObject",
+            key: file.storageKey,
+            responseContentDisposition: contentDisposition,
+            responseContentType: file.contentType,
+          }),
       };
     },
 
     /**
      * The whole share as one store-only ZIP64, like {@link openDownload} for a
-     * file: "unavailable", or null for anything not downloadable, including a
-     * share with a file whose CRC32 isn't known. Every file's fingerprint is
-     * checked before any bytes are served, and each read is guarded again.
+     * file: "unavailable", or null for anything not downloadable. When every
+     * file's CRC32 is known up front, the archive is laid out with an exact
+     * size and ETag so Range requests work; otherwise (e.g., direct-mode files
+     * before background CRC32 runs) it streams with ZIP data descriptors.
+     * Every file's fingerprint is checked before any bytes are served, and each
+     * read is guarded again.
      */
-    async openArchive(token: string): Promise<Lookup<Download>> {
+    async openArchive(token: string): Promise<Lookup<ArchiveDownload>> {
       const share = await findSharedShare(token);
       if (!share || share === "unavailable") return share;
       const shareFiles = await filesOf(share.id);
-      const crcs = shareFiles.map(fileCrc32);
-      if (crcs.some((crc) => crc === null)) return null;
       const etags = await Promise.all(shareFiles.map(checkFingerprint));
       if (etags.some((etag) => etag === null)) return null;
 
       const names = zipEntryNames(shareFiles.map((file) => file.name));
-      const entries = shareFiles.map((file, i) => ({ name: names[i], size: file.size, crc32: crcs[i]! }));
       const modified = share.readyAt ?? share.createdAt;
+      const archiveName = `${share.title ? safeFileName(share.title) : "Shared files"}.zip`;
+      const crcs = shareFiles.map(fileCrc32);
+      if (crcs.some((crc) => crc === null)) {
+        const streamingEntries = shareFiles.map((file, i) => ({ name: names[i], size: file.size }));
+        return {
+          name: archiveName,
+          size: null,
+          contentType: "application/zip",
+          etag: null,
+          read: async () =>
+            createStreamingZip(streamingEntries, modified, (i, range) => readChecked(shareFiles[i], etags[i]!, range)),
+        };
+      }
+
+      const entries = shareFiles.map((file, i) => ({ name: names[i], size: file.size, crc32: crcs[i]! }));
       const zip = createZip(entries, modified, (i, range) => readChecked(shareFiles[i], etags[i]!, range));
       // The archive's bytes follow from exactly these inputs.
       const version = createHash("sha256")
         .update(JSON.stringify([entries, shareFiles.map((file) => file.fingerprintHash ?? file.id), modified]))
         .digest("hex");
       return {
-        name: `${share.title ? safeFileName(share.title) : "Shared files"}.zip`,
+        name: archiveName,
         size: zip.size,
         contentType: "application/zip",
         etag: `"${version}"`,

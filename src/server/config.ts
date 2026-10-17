@@ -14,11 +14,56 @@ export function loadConfig(env: Env = process.env) {
       accessKeyId: required(env, "S3_ACCESS_KEY_ID"),
       secretAccessKey: required(env, "S3_SECRET_ACCESS_KEY"),
     },
+    transfer: loadTransferConfig(env),
     expiry: loadExpiryConfig(env),
     upload: loadUploadConfig(env),
     limits: loadLimitsConfig(env),
     cleanup: loadCleanupConfig(env),
   };
+}
+
+export type TransferMode = "proxy" | "direct" | "auto";
+
+export interface TransferConfig {
+  mode: TransferMode;
+  /** HTTPS URL where browsers reach storage in `direct` and `auto` modes; null in `proxy` mode. */
+  directEndpoint: string | null;
+  /** The app's own origin for the bucket's CORS rule, when set in `.env`. */
+  appOrigin: string | null;
+}
+
+/** How file bytes travel; throws on any invalid value or a missing HTTPS endpoint for direct transfers. */
+export function loadTransferConfig(env: Env = process.env): TransferConfig {
+  const mode = env.TRANSFER_MODE?.trim() || "proxy";
+  if (mode !== "proxy" && mode !== "direct" && mode !== "auto") {
+    throw new Error(`Invalid TRANSFER_MODE "${mode}": use proxy, direct or auto`);
+  }
+
+  const endpointValue = env.STORAGE_DIRECT_ENDPOINT?.trim();
+  let directEndpoint: string | null = null;
+  if (endpointValue) {
+    directEndpoint = httpsEndpoint(endpointValue);
+    if (!directEndpoint) {
+      throw new Error(
+        `Invalid STORAGE_DIRECT_ENDPOINT "${endpointValue}": use an https:// URL, like https://storage.lan.example.com`,
+      );
+    }
+  } else if (mode === "direct" || mode === "auto") {
+    throw new Error(
+      `Missing STORAGE_DIRECT_ENDPOINT: TRANSFER_MODE=${mode} requires an https:// URL for storage, like https://storage.lan.example.com`,
+    );
+  }
+
+  const originValue = env.APP_ORIGIN?.trim();
+  let appOrigin: string | null = null;
+  if (originValue) {
+    appOrigin = httpOrigin(originValue);
+    if (!appOrigin) {
+      throw new Error(`Invalid APP_ORIGIN "${originValue}": use an http(s) origin, like https://share.example.com`);
+    }
+  }
+
+  return { mode, directEndpoint, appOrigin };
 }
 
 export interface ExpiryOption {
@@ -246,8 +291,30 @@ function httpUrl(value: string): string | null {
   }
 }
 
+function httpsEndpoint(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) return null;
+    return url.href.replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function httpOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 function required(env: Env, name: string): string {
   const value = env[name];
   if (!value) throw new Error(`Missing required environment variable ${name}`);
   return value;
 }
+

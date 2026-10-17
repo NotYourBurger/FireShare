@@ -12,6 +12,8 @@ export interface PendingUpload {
   expiry: string;
   /** The title as sent, for Recent shares; absent in records saved before titles were kept. */
   title?: string | null;
+  /** True when the share was created in direct transfer mode. */
+  direct?: boolean;
   files: PendingFile[];
 }
 
@@ -62,11 +64,12 @@ export function matchFiles(pending: PendingUpload, picked: File[]): (File | unde
 
 function isPendingUpload(value: unknown): value is PendingUpload {
   if (typeof value !== "object" || value === null) return false;
-  const { shareId, expiry, title, files } = value as Record<string, unknown>;
+  const { shareId, expiry, title, direct, files } = value as Record<string, unknown>;
   return (
     typeof shareId === "string" &&
     typeof expiry === "string" &&
     (title === undefined || title === null || typeof title === "string") &&
+    (direct === undefined || typeof direct === "boolean") &&
     Array.isArray(files) &&
     files.length > 0 &&
     files.every(

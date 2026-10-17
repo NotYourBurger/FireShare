@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { crc32Combine } from "./integrity";
 import type { ByteRange } from "./storage/adapter";
 import { unzip, unzipRanges } from "./test-unzip";
-import { createZip, safeFileName, zipEntryNames } from "./zip";
+import { createStreamingZip, createZip, safeFileName, zipEntryNames } from "./zip";
 
 const modified = new Date("2026-03-04T05:06:08Z");
 
@@ -156,6 +156,33 @@ describe("zip archive", () => {
     const archive = await buffer(zip.read());
     expect(archive.indexOf(Buffer.from([0x50, 0x4b, 0x06, 0x06]))).toBe(-1);
     expect(archive.readUInt16LE(4)).toBe(20);
+  });
+
+  it("streams a store-only zip using data descriptors when CRC32s are computed on the fly", async () => {
+    const files: Record<string, Buffer> = {
+      "a.txt": Buffer.from("hello"),
+      "empty.bin": Buffer.alloc(0),
+      "c.txt": Buffer.from("x".repeat(70_000)),
+    };
+    const contents = Object.values(files);
+    const stream = createStreamingZip(
+      Object.keys(files).map((name, i) => ({ name, size: contents[i].length })),
+      modified,
+      async (index) => Readable.from([contents[index]]),
+    );
+    const archive = await buffer(stream);
+    const entries = await unzip(archive);
+    expect(entries.map((entry) => [entry.name, entry.size])).toEqual([
+      ["a.txt", 5],
+      ["empty.bin", 0],
+      ["c.txt", 70_000],
+    ]);
+    for (const entry of entries) {
+      const data = await entry.data();
+      expect(crc32(data)).toBe(entry.crc32);
+      expect(entry.flags & 0x0008).toBe(0x0008);
+    }
+    expect((await entries[0].data()).toString()).toBe("hello");
   });
 });
 
