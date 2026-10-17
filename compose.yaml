@@ -1,16 +1,20 @@
 # FireShare: copy .env.example to .env, set the secrets, then `docker compose up`.
 
+# Database and storage settings shared by the app and the cleanup worker.
+x-backend-env: &backend-env
+  DATABASE_URL: postgres://fireshare:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/fireshare
+  S3_ENDPOINT: http://storage:9000
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:-fireshare}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
+
 services:
   app:
     build: .
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://fireshare:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/fireshare
-      S3_ENDPOINT: http://storage:9000
-      S3_REGION: ${S3_REGION:-us-east-1}
-      S3_BUCKET: ${S3_BUCKET:-fireshare}
-      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
-      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
+      <<: *backend-env
       EXPIRY_OPTIONS: ${EXPIRY_OPTIONS:-}
       EXPIRY_DEFAULT: ${EXPIRY_DEFAULT:-}
       UPLOAD_CHUNK_SIZE: ${UPLOAD_CHUNK_SIZE:-}
@@ -23,6 +27,27 @@ services:
       storage:
         condition: service_started
     networks: [public, internal]
+
+  # Deletes expired and deleted shares after DELETE_GRACE, and abandoned
+  # uploads after PENDING_TTL. Internal only: it needs no inbound traffic.
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      DELETE_GRACE: ${DELETE_GRACE:-}
+      PENDING_TTL: ${PENDING_TTL:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      storage:
+        condition: service_started
+      # The app runs the database migrations.
+      app:
+        condition: service_started
+    networks: [internal]
 
   db:
     image: postgres:18.1-alpine

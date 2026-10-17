@@ -36,6 +36,13 @@
       "when": 1792236879052,
       "tag": "0004_management_link",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792239170863,
+      "tag": "0005_cleanup_worker",
+      "breakpoints": true
     }
   ]
 }

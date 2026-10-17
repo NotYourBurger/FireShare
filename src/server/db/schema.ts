@@ -12,8 +12,12 @@ export interface FilePart extends UploadedPart {
 
 export const shares = pgTable("shares", {
   id: uuid("id").primaryKey().defaultRandom(),
-  /** Expiry isn't a status: a `ready` share is expired once `expiresAt` has passed. */
-  status: text("status", { enum: ["pending", "ready", "deleted"] }).notNull().default("pending"),
+  /**
+   * Expiry isn't a status: a `ready` share is expired once `expiresAt` has
+   * passed. `abandoned` is a `pending` share past `PENDING_TTL` that the
+   * cleanup worker has claimed; its row goes once its storage is gone.
+   */
+  status: text("status", { enum: ["pending", "ready", "deleted", "abandoned"] }).notNull().default("pending"),
   /** SHA-256 of the share link token; the token itself is never stored. */
   tokenHash: text("token_hash").unique(),
   /** SHA-256 of the management link token, issued with the share link. Null for shares from before management links. */
@@ -60,6 +64,8 @@ export const files = pgTable(
      */
     fingerprintHash: text("fingerprint_hash"),
     fingerprintEtag: text("fingerprint_etag"),
+    /** When the cleanup worker deleted the stored object, after the share expired or was deleted. */
+    removedAt: timestamp("removed_at", { withTimezone: true }),
   },
   (table) => [unique().on(table.shareId, table.position)],
 );
