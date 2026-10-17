@@ -28,6 +28,8 @@ export interface NewFile {
 export interface NewShare {
   title: string | null;
   message: string | null;
+  /** How long the link works, counted from when the share becomes ready. */
+  expirySeconds: number;
   files: NewFile[];
 }
 
@@ -50,11 +52,24 @@ export interface Download {
   stream: Readable;
 }
 
-export function createShareService({ db, storage }: { db: Database; storage: StorageAdapter }) {
-  async function findReadyShare(token: string) {
-    return db.query.shares.findFirst({
+/** What a share token leads to: the share, a share whose link has expired, or nothing. */
+type Lookup<T> = T | "expired" | null;
+
+export function createShareService({
+  db,
+  storage,
+  now = () => new Date(),
+}: {
+  db: Database;
+  storage: StorageAdapter;
+  now?: () => Date;
+}) {
+  async function findReadyShare(token: string): Promise<Lookup<typeof shares.$inferSelect>> {
+    const share = await db.query.shares.findFirst({
       where: and(eq(shares.tokenHash, hashToken(token)), eq(shares.status, "ready")),
     });
+    if (!share) return null;
+    return share.expiresAt && share.expiresAt > now() ? share : "expired";
   }
 
   async function findPendingFile(fileId: string) {
@@ -73,7 +88,7 @@ export function createShareService({ db, storage }: { db: Database; storage: Sto
      * share and all its files appear together or not at all; files can never
      * be added to it afterwards.
      */
-    async createShare({ title, message, files: newFiles }: NewShare) {
+    async createShare({ title, message, expirySeconds, files: newFiles }: NewShare) {
       const uploads: { storageKey: string; multipartUploadId: string }[] = [];
       for (const file of newFiles) {
         const storageKey = randomUUID();
@@ -81,7 +96,7 @@ export function createShareService({ db, storage }: { db: Database; storage: Sto
         uploads.push({ storageKey, multipartUploadId: uploadId });
       }
       return db.transaction(async (tx) => {
-        const [share] = await tx.insert(shares).values({ title, message }).returning({ id: shares.id });
+        const [share] = await tx.insert(shares).values({ title, message, expirySeconds }).returning({ id: shares.id });
         const created = await tx
           .insert(files)
           .values(newFiles.map((file, i) => ({ ...file, ...uploads[i], shareId: share.id, position: i })))
@@ -133,8 +148,8 @@ export function createShareService({ db, storage }: { db: Database; storage: Sto
     },
 
     /**
-     * Completes every file and marks the share `ready`; returns the share token
-     * once. If any file can't be completed the share stays `pending`, and a
+     * Completes every file and marks the share `ready`, starting its expiry;
+     * returns the share token once. If any file can't be completed the share stays `pending`, and a
      * later call picks up where this one stopped.
      */
     async finalize(shareId: string) {
@@ -162,14 +177,16 @@ export function createShareService({ db, storage }: { db: Database; storage: Sto
         await storage.completeUpload(file.storageKey, file.multipartUploadId, parts);
         await db
           .update(files)
-          .set({ completedAt: new Date() })
+          .set({ completedAt: now() })
           .where(and(eq(files.id, file.id), isNull(files.completedAt)));
       }
 
       const token = generateToken();
+      const readyAt = now();
+      const expiresAt = new Date(readyAt.getTime() + share.expirySeconds * 1000);
       const updated = await db
         .update(shares)
-        .set({ status: "ready", tokenHash: hashToken(token), readyAt: new Date() })
+        .set({ status: "ready", tokenHash: hashToken(token), readyAt, expiresAt })
         .where(and(eq(shares.id, shareId), eq(shares.status, "pending")))
         .returning({ id: shares.id });
       if (updated.length === 0) throw new ShareError("not_found", "No such pending share");
@@ -177,9 +194,9 @@ export function createShareService({ db, storage }: { db: Database; storage: Sto
     },
 
     /** What a recipient sees for a share token, or null for anything not viewable. */
-    async viewShare(token: string): Promise<SharePage | null> {
+    async viewShare(token: string): Promise<Lookup<SharePage>> {
       const share = await findReadyShare(token);
-      if (!share) return null;
+      if (!share || share === "expired") return share;
       const shareFiles = await db
         .select({ id: files.id, name: files.name, size: files.size })
         .from(files)
@@ -188,11 +205,14 @@ export function createShareService({ db, storage }: { db: Database; storage: Sto
       return { title: share.title, message: share.message, files: shareFiles };
     },
 
-    /** Resolves a share token and one of its files, or null for anything not downloadable. */
-    async openDownload(token: string, fileId: string): Promise<Download | null> {
-      if (!isUuid(fileId)) return null;
+    /**
+     * Resolves a share token and one of its files, "expired" once the link has
+     * expired, or null for anything else not downloadable.
+     */
+    async openDownload(token: string, fileId: string): Promise<Lookup<Download>> {
       const share = await findReadyShare(token);
-      if (!share) return null;
+      if (!share || share === "expired") return share;
+      if (!isUuid(fileId)) return null;
       const file = await db.query.files.findFirst({
         where: and(eq(files.id, fileId), eq(files.shareId, share.id)),
       });

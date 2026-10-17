@@ -11,6 +11,8 @@ services:
       S3_BUCKET: ${S3_BUCKET:-fireshare}
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
+      EXPIRY_OPTIONS: ${EXPIRY_OPTIONS:-}
+      EXPIRY_DEFAULT: ${EXPIRY_DEFAULT:-}
     ports:
       - "${APP_PORT:-3000}:3000"
     depends_on:

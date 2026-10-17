@@ -16,3 +16,12 @@ export function formatBytes(bytes: number): string {
   }
   return `${Number(value.toPrecision(3))} ${UNITS[unit]}`;
 }
+
+/** An expiry preset such as "7d" or "12h" in words, e.g. "7 days". */
+export function formatExpiry(value: string): string {
+  const match = /^(\d+)([hd])$/.exec(value);
+  if (!match) return value;
+  const n = Number(match[1]);
+  const unit = match[2] === "h" ? "hour" : "day";
+  return `${n} ${unit}${n === 1 ? "" : "s"}`;
+}

@@ -93,7 +93,8 @@ progress {
 
 .link input,
 .field input,
-.field textarea {
+.field textarea,
+.field select {
   flex: 1;
   min-width: 0;
   padding: 0.5rem;

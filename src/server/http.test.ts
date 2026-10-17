@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { loadExpiryConfig } from "./config";
 import { createTestDb } from "./db/test-db";
 import { createHttpHandlers, MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, type HttpHandlers } from "./http";
 import { createShareService } from "./shares";
@@ -6,11 +7,25 @@ import { createMemoryStorage } from "./storage/memory";
 import { generateToken } from "./tokens";
 
 let http: HttpHandlers;
+let clock: Date;
 
 beforeEach(async () => {
-  const shares = createShareService({ db: await createTestDb(), storage: createMemoryStorage() });
-  http = createHttpHandlers({ shares });
+  clock = new Date("2026-01-01T00:00:00Z");
+  const shares = createShareService({
+    db: await createTestDb(),
+    storage: createMemoryStorage(),
+    now: () => clock,
+  });
+  http = createHttpHandlers({
+    shares,
+    expiry: loadExpiryConfig({ EXPIRY_OPTIONS: "12h,1d,7d", EXPIRY_DEFAULT: "1d" }),
+  });
 });
+
+/** Moves the clock forward. */
+const advanceHours = (hours: number) => {
+  clock = new Date(clock.getTime() + hours * 3600_000);
+};
 
 const origin = "http://fireshare.test";
 
@@ -46,17 +61,17 @@ function finalize(shareId: string) {
 }
 
 /** Creates, uploads and finalizes a one-file share; returns the file's download path. */
-async function share(name: string, data: string): Promise<string> {
-  const created = await (await createShare([{ name, size: Buffer.byteLength(data) }])).json();
+async function share(name: string, data: string, fields: Record<string, unknown> = {}): Promise<string> {
+  const created = await (await createShare([{ name, size: Buffer.byteLength(data) }], fields)).json();
   await patch(created.files[0].id, 0, data);
   const { path } = await (await finalize(created.id)).json();
   return `${path}/files/${created.files[0].id}`;
 }
 
 /** GET /d/:token/files/:fileId */
-function download(path: string) {
+function download(path: string, headers: Record<string, string> = {}) {
   const [, token, fileId] = path.match(/^\/d\/([^/]+)\/files\/([^/]+)$/)!;
-  return http.download(new Request(`${origin}${path}`), token, fileId);
+  return http.download(new Request(`${origin}${path}`, { headers }), token, fileId);
 }
 
 describe("HTTP API", () => {
@@ -252,5 +267,48 @@ describe("HTTP API", () => {
     await patch(files[0].id, 0, "a");
     await finalize(id);
     expect((await patch(files[0].id, 1, "")).status).toBe(404);
+  });
+
+  describe("expiry", () => {
+    it("offers the configured presets with the default preselected", () => {
+      expect(http.uploadOptions()).toEqual({ expiryOptions: ["12h", "1d", "7d"], expiryDefault: "1d" });
+    });
+
+    it.each([["2d"], ["24h"], [7], [""], [null]])("rejects the expiry %j with a reason", async (expiry) => {
+      const res = await createShare([{ name: "a", size: 1 }], { expiry });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Expiry must be one of 12h, 1d, 7d");
+    });
+
+    it("keeps the link working for the chosen preset", async () => {
+      const path = await share("a.txt", "a", { expiry: "12h" });
+      advanceHours(11);
+      expect((await download(path)).status).toBe(200);
+      advanceHours(1);
+      expect((await download(path)).status).toBe(410);
+    });
+
+    it("uses the default preset when none is given", async () => {
+      const path = await share("a.txt", "a");
+      advanceHours(23);
+      expect((await download(path)).status).toBe(200);
+      advanceHours(1);
+      expect((await download(path)).status).toBe(410);
+    });
+
+    it("refuses downloads and resumes of an expired share with an expired page", async () => {
+      const path = await share("a.txt", "abc", { expiry: "12h" });
+      advanceHours(12);
+
+      for (const headers of [{}, { Range: "bytes=1-" }] as Record<string, string>[]) {
+        const res = await download(path, headers);
+        expect(res.status).toBe(410);
+        expect(res.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+        expect(res.headers.get("Content-Disposition")).toBeNull();
+        expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+        expect(await res.text()).toContain("This link has expired");
+      }
+      expect(await http.viewShare(path.split("/")[2])).toBe("expired");
+    });
   });
 });

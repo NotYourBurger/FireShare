@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Upload } from "tus-js-client";
-import { formatBytes } from "./format";
+import { formatBytes, formatExpiry } from "./format";
 
 const CHUNK_SIZE = 64 * 1024 * 1024;
 const PARALLEL_UPLOADS = 3;
@@ -13,13 +13,14 @@ const MAX_MESSAGE_LENGTH = 5000;
 type State =
   | { step: "select" }
   | { step: "uploading"; progress: number }
-  | { step: "done"; url: string }
+  | { step: "done"; url: string; expiry: string }
   | { step: "failed"; message: string };
 
-export function UploadForm() {
+export function UploadForm({ expiryOptions, expiryDefault }: { expiryOptions: string[]; expiryDefault: string }) {
   const [files, setFiles] = useState<File[]>([]);
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
+  const [expiry, setExpiry] = useState(expiryDefault);
   const [state, setState] = useState<State>({ step: "select" });
 
   async function share() {
@@ -29,6 +30,7 @@ export function UploadForm() {
       const created = await postJson("/api/shares", {
         title,
         message,
+        expiry,
         files: files.map((file) => ({ name: file.name, size: file.size, type: file.type })),
       });
       const total = files.reduce((sum, file) => sum + file.size, 0);
@@ -41,7 +43,7 @@ export function UploadForm() {
         }),
       );
       const { path } = await postJson(`/api/shares/${created.id}/finalize`);
-      setState({ step: "done", url: new URL(path, location.href).href });
+      setState({ step: "done", url: new URL(path, location.href).href, expiry });
     } catch (err) {
       setState({ step: "failed", message: err instanceof Error ? err.message : String(err) });
     }
@@ -55,11 +57,13 @@ export function UploadForm() {
           <input readOnly value={state.url} onFocus={(e) => e.target.select()} aria-label="Share link" />
           <button onClick={() => navigator.clipboard.writeText(state.url)}>Copy</button>
         </div>
+        <span className="muted">It expires in {formatExpiry(state.expiry)}.</span>
         <button
           onClick={() => {
             setFiles([]);
             setTitle("");
             setMessage("");
+            setExpiry(expiryDefault);
             setState({ step: "select" });
           }}
         >
@@ -125,6 +129,16 @@ export function UploadForm() {
           disabled={uploading}
           onChange={(e) => setMessage(e.target.value)}
         />
+      </label>
+      <label className="field">
+        <span>Link expires after</span>
+        <select value={expiry} disabled={uploading} onChange={(e) => setExpiry(e.target.value)}>
+          {expiryOptions.map((option) => (
+            <option key={option} value={option}>
+              {formatExpiry(option)}
+            </option>
+          ))}
+        </select>
       </label>
       {uploading && (
         <div>
