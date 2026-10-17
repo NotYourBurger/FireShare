@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CopyField } from "@/app/copy-field";
+import { CopyButton } from "@/app/copy-field";
+import { CrossIcon } from "@/app/icons";
 import { LocalTime } from "@/app/local-time";
 import { loadRecentShares, managementToken, removeRecentShare, type RecentShare } from "@/app/recent-shares";
 import type { ShareStatus } from "@/server/shares";
@@ -51,41 +52,61 @@ export function RecentSharesView({
 }) {
   if (entries.length === 0) {
     return (
-      <div className="card">
-        <p className="muted">
-          No shares yet. Shares you create in this browser are listed here, except in private windows or when site data
-          is blocked.
-        </p>
+      <div className="sheet">
+        <div className="sheet-section">
+          <p className="muted">
+            No shares yet. Shares you create in this browser are listed here, except in private windows or when site
+            data is blocked.
+          </p>
+          <div className="actions">
+            <a className="button" href="/">
+              Share files
+            </a>
+          </div>
+        </div>
       </div>
     );
   }
   return (
     <>
-      <ul className="card files recent">
+      <ul className="sheet rows recent">
         {entries.map((entry) => {
           const status = statuses[entry.manageUrl] ?? "unknown";
+          const name = entry.title ?? "Shared files";
           return (
-            <li key={entry.manageUrl}>
-              <div className="file-info">
-                <span className="file-name">{entry.title ?? "Shared files"}</span>
-                <span className="muted">
+            <li key={entry.manageUrl} className="row" data-status={status}>
+              <div className="recent-main">
+                {status === "active" ? (
+                  <a className="row-name" href={entry.url} target="_blank" rel="noreferrer">
+                    {name}
+                  </a>
+                ) : (
+                  <span className="row-name">{name}</span>
+                )}
+                <span className="recent-status">
+                  <span className="status-dot" aria-hidden="true" />
                   <EntryStatusText entry={entry} status={status} />
                 </span>
-                {status === "active" && <CopyField value={entry.url} label="Share link" />}
-                <div className="actions">
-                  {status !== "gone" && (
-                    <a className="button secondary" href={entry.manageUrl}>
-                      Manage
-                    </a>
-                  )}
-                  <button
-                    className="secondary"
-                    onClick={() => onRemove(entry.manageUrl)}
-                    aria-label={`Remove ${entry.title ?? "Shared files"} from this list`}
-                  >
-                    Remove from list
-                  </button>
-                </div>
+              </div>
+              <div className="recent-actions">
+                {status === "active" && (
+                  <CopyButton value={entry.url} label={`Copy share link for ${name}`}>
+                    Copy link
+                  </CopyButton>
+                )}
+                {status !== "gone" && (
+                  <a className="button quiet" href={entry.manageUrl}>
+                    Manage
+                  </a>
+                )}
+                <button
+                  className="icon"
+                  onClick={() => onRemove(entry.manageUrl)}
+                  aria-label={`Remove ${name} from this list`}
+                  title="Remove from list"
+                >
+                  <CrossIcon />
+                </button>
               </div>
             </li>
           );

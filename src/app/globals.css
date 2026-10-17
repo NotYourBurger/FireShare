@@ -539,14 +539,6 @@ main {
   gap: 0.6rem;
 }
 
-.step-badge {
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--accent);
-}
-
 h1 {
   margin: 0;
   font-family: var(--font-display), "Anton", Impact, "Arial Narrow", sans-serif;
@@ -602,84 +594,6 @@ h1 {
   -webkit-backdrop-filter: blur(32px) saturate(150%);
 }
 
-.step-header {
-  display: grid;
-  gap: 0.35rem;
-}
-
-.step-header strong {
-  font-size: 1.25rem;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-
-/* Generous Interactive Drag-and-Drop Zone */
-.dropzone {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  gap: 0.45rem;
-  padding: 2.35rem 1.65rem;
-  border-radius: 22px;
-  border: 1.5px dashed var(--border-strong);
-  background: var(--surface-subtle);
-  cursor: pointer;
-  transition: border-color 0.2s ease, background-color 0.2s ease;
-}
-
-.dropzone:hover,
-.dropzone.is-dragging,
-.dropzone:focus-within {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.dropzone input[type="file"] {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.dropzone-plus {
-  width: 3rem;
-  height: 3rem;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.5rem;
-  font-weight: 300;
-  background: var(--surface-elevated);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  margin-bottom: 0.25rem;
-  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
-}
-
-.dropzone:hover .dropzone-plus,
-.dropzone.is-dragging .dropzone-plus {
-  background: var(--accent);
-  color: var(--accent-text);
-  border-color: var(--accent);
-}
-
-.dropzone-title {
-  font-size: 1.06rem;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.dropzone-hint {
-  font-size: 0.88rem;
-  color: var(--muted);
-}
-
 /* Form Fields */
 .fields-grid {
   display: grid;
@@ -695,12 +609,6 @@ h1 {
   color: var(--text);
 }
 
-.link {
-  display: flex;
-  gap: 0.65rem;
-}
-
-.link input,
 .field input,
 .field textarea,
 .field select {
@@ -716,7 +624,6 @@ h1 {
   transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.link input:focus,
 .field input:focus,
 .field textarea:focus,
 .field select:focus {
@@ -793,38 +700,6 @@ button.danger {
 
 button.danger:hover:not(:disabled) {
   filter: brightness(1.08);
-}
-
-/* Progress bars */
-.progress-overview {
-  display: grid;
-  gap: 0.5rem;
-}
-
-progress {
-  width: 100%;
-  height: 7px;
-  border: 0;
-  border-radius: 999px;
-  overflow: hidden;
-  background: var(--surface-subtle);
-  accent-color: var(--accent);
-}
-
-progress::-webkit-progress-bar {
-  background: var(--surface-subtle);
-  border-radius: 999px;
-}
-
-progress::-webkit-progress-value {
-  background: var(--accent);
-  border-radius: 999px;
-  transition: width 0.2s ease;
-}
-
-progress::-moz-progress-bar {
-  background: var(--accent);
-  border-radius: 999px;
 }
 
 /* File Lists */
@@ -966,23 +841,13 @@ a {
   background: var(--accent);
 }
 
-.save-link,
 .confirm {
   display: grid;
   gap: 0.65rem;
   padding: 1.2rem 1.35rem;
-  border: 1px solid rgba(255, 90, 31, 0.35);
-  background: var(--accent-soft);
-  border-radius: 20px;
-}
-
-.confirm {
-  border-color: rgba(229, 83, 83, 0.4);
+  border: 1px solid rgba(229, 83, 83, 0.4);
   background: var(--danger-soft);
-}
-
-.recent .file-info {
-  gap: 0.65rem;
+  border-radius: 20px;
 }
 
 .note {
@@ -994,6 +859,577 @@ a {
   margin: 0.6rem 0 0;
   font-size: 0.88rem;
   text-align: center;
+}
+
+/* ==========================================================================
+   Transfer sheet: uploading, the ready link, the management link and
+   recent shares. One glass surface, divided by hairlines, never boxes in boxes.
+   ========================================================================== */
+
+.sheet {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  box-shadow: var(--shadow-ambient), inset 0 1px 0 var(--glass-highlight);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  overflow: hidden;
+}
+
+.sheet-section {
+  display: grid;
+  gap: 1rem;
+  padding: 1.5rem 1.6rem;
+}
+
+.sheet > * + * {
+  border-top: 1px solid var(--border);
+}
+
+.sheet-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.sheet h2,
+.sheet h3 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--text);
+}
+
+.sheet h2 {
+  font-size: 1.0625rem;
+}
+
+.sheet h3 {
+  font-size: 0.9375rem;
+}
+
+.sheet p {
+  margin: 0;
+}
+
+.sheet .muted {
+  font-size: 0.875rem;
+}
+
+.sheet-foot {
+  padding-top: 1rem;
+  padding-bottom: 1rem;
+}
+
+.sheet-foot .quiet {
+  justify-self: start;
+}
+
+/* Buttons inside the sheet are smaller and squarer than the app's defaults. */
+.sheet button,
+.sheet .button {
+  padding: 0.62rem 1rem;
+  border-radius: 11px;
+  font-size: 0.875rem;
+}
+
+.sheet :is(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sheet .primary-wide {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  font-size: 0.9375rem;
+}
+
+.sheet .quiet {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.sheet .quiet:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.sheet .quiet[data-copied] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.sheet .icon {
+  width: 2.15rem;
+  height: 2.15rem;
+  padding: 0;
+  flex-shrink: 0;
+  background: transparent;
+  color: var(--subtle);
+  border: 0;
+}
+
+.sheet .icon:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* Drop target: a single row rather than a tall box. */
+.drop {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.1rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: 14px;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.drop:hover,
+.drop.is-dragging,
+.drop:focus-within {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.drop input[type="file"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.drop-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex-shrink: 0;
+  border-radius: 11px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  color: var(--text);
+  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+
+.drop:hover .drop-icon,
+.drop.is-dragging .drop-icon {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.drop-text {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.drop-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.drop-hint {
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+/* Rows: files, upload progress, recent shares */
+.rows {
+  margin: 0;
+  padding: 0.35rem 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.35rem 1rem;
+  padding: 0.6rem 1.6rem;
+  min-height: 3rem;
+}
+
+.rows > .row + .row {
+  border-top: 1px solid var(--border);
+}
+
+.row-name {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.row-meta {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.row-progress {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.row-index {
+  min-width: 1.4rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.row[data-status="failed"] .row-meta {
+  color: var(--danger);
+}
+
+.row[data-status="done"] .row-meta,
+.row-progress:is([data-status="uploading"], [data-status="retrying"]) .row-index {
+  color: var(--text);
+}
+
+/*
+ * Upload dial: a large circle entering from the sheet's left edge, one dot per
+ * file, the arc filling up to a fixed marker. Beside it, the overall figure in
+ * the display face and the file in flight with its own small ring.
+ */
+.dial {
+  grid-template-columns: 11.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 1.6rem 0 0;
+}
+
+.dial-arc {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.dial-track {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.dial-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.dial-dot {
+  fill: var(--border-strong);
+}
+
+.dial-arc [data-status="done"] .dial-dot {
+  fill: var(--accent);
+}
+
+.dial-arc [data-status="failed"] .dial-dot {
+  fill: var(--danger);
+}
+
+.dial-number {
+  font-family: var(--font-display), "Anton", Impact, sans-serif;
+  font-size: 22px;
+  fill: var(--text);
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.dial-marker {
+  fill: var(--text);
+}
+
+.dial[data-stopped] .dial-marker {
+  fill: var(--danger);
+}
+
+.dial-readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 1.5rem;
+  padding: 1.5rem 0;
+  min-width: 0;
+}
+
+.dial-overall {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.dial-percent {
+  font-family: var(--font-display), "Anton", Impact, "Arial Narrow", sans-serif;
+  font-size: clamp(4rem, 6.5vw, 5.25rem);
+  line-height: 0.85;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.dial-percent-sign {
+  font-size: 0.42em;
+  margin-left: 0.08em;
+  color: var(--muted);
+}
+
+.dial-bytes {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dial-current {
+  flex: 1 1 11rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.dial-ring {
+  width: 2rem;
+  height: 2rem;
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+}
+
+.dial-ring-track {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 2;
+}
+
+.dial-ring-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.25s ease;
+}
+
+.dial-current[data-status="failed"] .dial-ring-fill {
+  stroke: var(--danger);
+}
+
+.dial-current-text {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.dial-current-text strong {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.dial-current-text span {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.dial-current[data-status="failed"] .dial-current-text span {
+  color: var(--danger);
+}
+
+/* Form fields inside the sheet */
+.sheet .fields-grid {
+  gap: 0.75rem;
+}
+
+.sheet .field {
+  gap: 0.35rem;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.sheet .field :is(input, select, textarea),
+.link input {
+  padding: 0.68rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9375rem;
+}
+
+.sheet .field :is(input, select, textarea):focus,
+.link input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface-elevated);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* The ready link: set large so it reads at a glance and copies in one press. */
+.slab {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1rem 1rem 1.2rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: var(--surface-subtle);
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.slab[data-copied] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.slab-url {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 0.15rem;
+  color: var(--text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.slab-host {
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.slab-path {
+  font-size: clamp(1.15rem, 1.6vw, 1.4rem);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.slab-url:hover .slab-path {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+.slab button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.link {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.link input {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+/* Recent shares */
+.recent .row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-top: 0.85rem;
+  padding-bottom: 0.85rem;
+}
+
+.recent-main {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.recent a.row-name {
+  text-decoration: none;
+}
+
+.recent a.row-name:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.recent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--subtle);
+}
+
+.recent .row[data-status="active"] .status-dot {
+  background: var(--accent);
+}
+
+.recent .row:is([data-status="gone"], [data-status="deleted"], [data-status="expired"]) .row-name {
+  color: var(--muted);
+}
+
+.recent-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+@media (max-width: 520px) {
+  .sheet-section {
+    padding: 1.25rem;
+  }
+
+  .row {
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+  }
+
+  .recent .row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .slab {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dial {
+    grid-template-columns: 8rem minmax(0, 1fr);
+    padding-right: 1.25rem;
+  }
+
+  .dial-readout {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dial-ring-fill {
+    transition: none;
+  }
 }
 
 /* ==========================================================================
