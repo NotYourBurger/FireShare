@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import type { ExpiryConfig, UploadConfig } from "./config";
 import { ShareError, type Download, type NewShare, type ShareErrorCode, type ShareService } from "./shares";
+import type { RateLimiter } from "./rate-limit";
 import type { ByteRange } from "./storage/adapter";
 import type { UploadAccess, UploadAccessControl } from "./upload-access";
 
@@ -22,7 +23,16 @@ const errorStatus: Record<ShareErrorCode, number> = {
   not_finalizable: 409,
   // The stored object conflicts with the fingerprint recorded at finalize.
   tampered: 409,
+  too_large: 413,
+  storage_full: 507,
+  quota_exceeded: 403,
 };
+
+/** Per-client-IP request limits; null when off. */
+export interface RateLimits {
+  upload: RateLimiter | null;
+  download: RateLimiter | null;
+}
 
 /**
  * Framework-independent request handlers. The Next.js route files only
@@ -33,20 +43,43 @@ export function createHttpHandlers({
   expiry,
   upload,
   access,
+  rateLimits = { upload: null, download: null },
 }: {
   shares: ShareService;
   expiry: ExpiryConfig;
   upload: UploadConfig;
   access: UploadAccessControl;
+  rateLimits?: RateLimits;
 }) {
+  /** Counts the request against `limiter`; returns the seconds to wait if it's over, else 0. */
+  function throttle(limiter: RateLimiter | null, req: Request): number {
+    if (!limiter) return 0;
+    const client = access.clientAddress(req.headers) ?? "unknown";
+    const retryAfter = limiter.retryAfter(client);
+    if (retryAfter === 0) limiter.hit(client);
+    return retryAfter;
+  }
+
   /** A refusal for a request that may not upload, or null to go ahead. */
-  function refuseUpload(req: Request, respond: (status: number, error: string) => Response): Response | null {
+  function refuseUpload(
+    req: Request,
+    respond: (status: number, error: string, headers?: Record<string, string>) => Response,
+  ): Response | null {
+    const retryAfter = throttle(rateLimits.upload, req);
+    if (retryAfter > 0) return respond(429, rateLimitedMessage(retryAfter), { "Retry-After": String(retryAfter) });
     const result = access.check(req.headers);
     if (result === "allowed") return null;
     return respond(accessStatus[result], ACCESS_ERROR[result]);
   }
-  const refuseJson = (req: Request) => refuseUpload(req, (status, error) => json(status, { error }));
-  const refuseTus = (req: Request) => refuseUpload(req, (status) => tus(status));
+  const refuseJson = (req: Request) => refuseUpload(req, (status, error, headers) => json(status, { error }, headers));
+  const refuseTus = (req: Request) => refuseUpload(req, (status, _error, headers) => tus(status, headers));
+
+  /** A refusal for a download over the rate limit, or null to go ahead. */
+  function refuseDownload(req: Request): Response | null {
+    const retryAfter = throttle(rateLimits.download, req);
+    if (retryAfter === 0) return null;
+    return html(429, RATE_LIMITED_PAGE(retryAfter), { "Retry-After": String(retryAfter) });
+  }
 
   return {
     /** Whether the request's sender may upload, for the upload page. */
@@ -98,7 +131,13 @@ export function createHttpHandlers({
       if (refused) return refused;
       const newShare = parseNewShare(await req.json().catch(() => null), expiry);
       if (typeof newShare === "string") return json(400, { error: newShare });
-      const share = await shares.createShare(newShare);
+      let share;
+      try {
+        share = await shares.createShare({ ...newShare, clientIp: access.clientAddress(req.headers) });
+      } catch (err) {
+        if (err instanceof ShareError) return json(errorStatus[err.code], { error: err.message });
+        throw err;
+      }
       return json(201, {
         id: share.id,
         files: share.files.map((file) => ({ ...file, uploadUrl: `/api/uploads/${file.id}` })),
@@ -201,6 +240,8 @@ export function createHttpHandlers({
      * or the single byte range asked for, so interrupted downloads resume.
      */
     async download(req: Request, token: string, fileId: string) {
+      const refused = refuseDownload(req);
+      if (refused) return refused;
       try {
         const file = await shares.openDownload(token, fileId);
         if (file === "unavailable") return html(410, UNAVAILABLE_PAGE);
@@ -217,6 +258,8 @@ export function createHttpHandlers({
      * length and byte ranges like a single file, so it resumes too.
      */
     async downloadAll(req: Request, token: string) {
+      const refused = refuseDownload(req);
+      if (refused) return refused;
       try {
         const archive = await shares.openArchive(token);
         if (archive === "unavailable") return html(410, UNAVAILABLE_PAGE);
@@ -233,6 +276,9 @@ export function createHttpHandlers({
 export type HttpHandlers = ReturnType<typeof createHttpHandlers>;
 
 const accessStatus = { password: 401, network: 403 } as const;
+
+const rateLimitedMessage = (seconds: number) =>
+  `Too many requests from your network. Try again in ${seconds} second${seconds === 1 ? "" : "s"}.`;
 
 const ACCESS_ERROR = {
   password: "Enter the upload password to upload. If you already did, your session has ended: reload the page.",
@@ -314,6 +360,9 @@ const TAMPERED_PAGE = page(
   "A stored copy has changed since it was shared, so FireShare won't serve it. Ask the sender to share it again.",
 );
 
+const RATE_LIMITED_PAGE = (seconds: number) =>
+  page("Too many requests", "Too many requests", rateLimitedMessage(seconds));
+
 // Keep in step with ShareUnavailable in src/app/d/[token]/share-view.tsx.
 const UNAVAILABLE_PAGE = page(
   "Link no longer available",
@@ -322,7 +371,7 @@ const UNAVAILABLE_PAGE = page(
 );
 
 /** The validated share, or an error message for the uploader. */
-function parseNewShare(input: unknown, expiry: ExpiryConfig): NewShare | string {
+function parseNewShare(input: unknown, expiry: ExpiryConfig): Omit<NewShare, "clientIp"> | string {
   if (!isRecord(input)) return "Invalid request";
   const expiryValue = input.expiry === undefined ? expiry.default : input.expiry;
   const expiryOption = expiry.options.find((option) => option.value === expiryValue);
@@ -374,15 +423,15 @@ function tus(status: number, headers: Record<string, string> = {}) {
   return new Response(null, { status, headers: { "Tus-Resumable": TUS_VERSION, ...headers } });
 }
 
-function html(status: number, body: string) {
+function html(status: number, body: string, headers: Record<string, string> = {}) {
   return new Response(body, {
     status,
-    headers: { "Content-Type": "text/html; charset=utf-8", ...SAFE_HEADERS },
+    headers: { "Content-Type": "text/html; charset=utf-8", ...SAFE_HEADERS, ...headers },
   });
 }
 
-function json(status: number, body: unknown) {
-  return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
+function json(status: number, body: unknown, headers: Record<string, string> = {}) {
+  return Response.json(body, { status, headers: { "Cache-Control": "no-store", ...headers } });
 }
 
 function parseNonNegativeInt(value: string | null): number | null {

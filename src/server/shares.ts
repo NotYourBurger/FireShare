@@ -1,5 +1,6 @@
-import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { Readable } from "node:stream";
+import type { LimitsConfig } from "./config";
 import { schema, type Database } from "./db";
 import { createHash, randomUUID } from "node:crypto";
 import { chunkHashesFingerprint, combineCrc32, verifiedChunk } from "./integrity";
@@ -21,7 +22,10 @@ export type ShareErrorCode =
   | "invalid_chunk"
   | "checksum_mismatch"
   | "not_finalizable"
-  | "tampered";
+  | "tampered"
+  | "too_large"
+  | "storage_full"
+  | "quota_exceeded";
 
 export class ShareError extends Error {
   constructor(
@@ -40,6 +44,8 @@ export interface NewFile {
 }
 
 export interface NewShare {
+  /** The uploader's IP address, or null if it isn't known. */
+  clientIp: string | null;
   title: string | null;
   message: string | null;
   /** How long the link works, counted from when the share becomes ready. */
@@ -94,6 +100,25 @@ export interface ManagedShare {
  */
 type Lookup<T> = T | "unavailable" | null;
 
+/** The limits a new share must fit within; each is null when it's off. */
+export type ShareLimits = Pick<
+  LimitsConfig,
+  "maxShareSize" | "maxFilesPerShare" | "maxTotalStorage" | "uploadQuotaPerIp" | "maxActiveSharesPerIp"
+>;
+
+const NO_LIMITS: ShareLimits = {
+  maxShareSize: null,
+  maxFilesPerShare: null,
+  maxTotalStorage: null,
+  uploadQuotaPerIp: null,
+  maxActiveSharesPerIp: null,
+};
+
+/** Serializes the limit checks of shares being created, so parallel uploads can't race past a limit. */
+const LIMITS_LOCK = 0x46697265; // "Fire"
+
+const QUOTA_WINDOW_SECONDS = 86400;
+
 type ShareRow = typeof shares.$inferSelect;
 type FileRow = typeof files.$inferSelect;
 
@@ -111,12 +136,83 @@ function tampered(fileId: string, detail: string): ShareError {
 export function createShareService({
   db,
   storage,
+  limits = NO_LIMITS,
   now = () => new Date(),
 }: {
   db: Database;
   storage: StorageAdapter;
+  limits?: ShareLimits;
   now?: () => Date;
 }) {
+  const countsOtherShares =
+    limits.maxTotalStorage !== null || limits.uploadQuotaPerIp !== null || limits.maxActiveSharesPerIp !== null;
+
+  /** Shares that hold storage and a link: still uploading, or ready and not yet expired. */
+  const isActive = () =>
+    or(eq(shares.status, "pending"), and(eq(shares.status, "ready"), gt(shares.expiresAt, now())));
+
+  const fromClient = (clientIp: string | null) =>
+    clientIp === null ? isNull(shares.clientIp) : eq(shares.clientIp, clientIp);
+
+  /** Total declared size of the files of the shares matching `where`. */
+  async function declaredBytes(query: Pick<Database, "select">, where: SQL | undefined) {
+    const [row] = await query
+      .select({ bytes: sql<string | null>`sum(${files.size})` })
+      .from(files)
+      .innerJoin(shares, eq(files.shareId, shares.id))
+      .where(where);
+    return Number(row?.bytes ?? 0);
+  }
+
+  /**
+   * Throws a ShareError, with a message for the uploader, if `newShare`
+   * doesn't fit within the limits beside the shares already created.
+   */
+  async function checkLimits(query: Pick<Database, "select">, newShare: NewShare) {
+    const size = newShare.files.reduce((sum, file) => sum + file.size, 0);
+    const { maxShareSize, maxFilesPerShare, maxTotalStorage, uploadQuotaPerIp, maxActiveSharesPerIp } = limits;
+    if (maxFilesPerShare !== null && newShare.files.length > maxFilesPerShare) {
+      throw new ShareError(
+        "too_large",
+        `A share can hold at most ${maxFilesPerShare} files, and this one has ${newShare.files.length}. Share fewer files at once.`,
+      );
+    }
+    if (maxShareSize !== null && size > maxShareSize.bytes) {
+      throw new ShareError(
+        "too_large",
+        `A share can be at most ${maxShareSize.value} in total. Share fewer or smaller files.`,
+      );
+    }
+    if (maxActiveSharesPerIp !== null) {
+      const [{ active }] = await query
+        .select({ active: count() })
+        .from(shares)
+        .where(and(fromClient(newShare.clientIp), isActive()));
+      if (active >= maxActiveSharesPerIp) {
+        throw new ShareError(
+          "quota_exceeded",
+          `You already have ${active} active shares, the most allowed. Delete one from Recent shares, or wait for one to expire.`,
+        );
+      }
+    }
+    if (uploadQuotaPerIp !== null) {
+      const since = new Date(now().getTime() - QUOTA_WINDOW_SECONDS * 1000);
+      const uploaded = await declaredBytes(query, and(fromClient(newShare.clientIp), gt(shares.createdAt, since)));
+      if (uploaded + size > uploadQuotaPerIp.bytes) {
+        throw new ShareError(
+          "quota_exceeded",
+          `This share would take you past the upload quota of ${uploadQuotaPerIp.value} per 24 hours. Try a smaller share, or try again later.`,
+        );
+      }
+    }
+    if (maxTotalStorage !== null && (await declaredBytes(query, isActive())) + size > maxTotalStorage.bytes) {
+      throw new ShareError(
+        "storage_full",
+        "The server doesn't have room for this share right now. Try a smaller share, or try again later.",
+      );
+    }
+  }
+
   function statusOf(share: ShareRow): ShareStatus {
     if (share.status === "deleted") return "deleted";
     return share.expiresAt && share.expiresAt > now() ? "active" : "expired";
@@ -186,27 +282,41 @@ export function createShareService({
     /**
      * Creates a `pending` share with a random storage key for each file. The
      * share and all its files appear together or not at all; files can never
-     * be added to it afterwards.
+     * be added to it afterwards. Throws a ShareError, before anything is
+     * stored, if the share doesn't fit within the limits.
      */
-    async createShare({ title, message, expirySeconds, files: newFiles }: NewShare) {
+    async createShare(newShare: NewShare) {
+      const { clientIp, title, message, expirySeconds, files: newFiles } = newShare;
+      await checkLimits(db, newShare);
       const uploads: { storageKey: string; multipartUploadId: string }[] = [];
-      for (const file of newFiles) {
-        const storageKey = randomUUID();
-        const { uploadId } = await storage.createUpload(storageKey, file.contentType);
-        uploads.push({ storageKey, multipartUploadId: uploadId });
+      try {
+        for (const file of newFiles) {
+          const storageKey = randomUUID();
+          const { uploadId } = await storage.createUpload(storageKey, file.contentType);
+          uploads.push({ storageKey, multipartUploadId: uploadId });
+        }
+        return await db.transaction(async (tx) => {
+          if (countsOtherShares) {
+            // Checked again under the lock: another share may have been created since.
+            await tx.execute(sql`select pg_advisory_xact_lock(${LIMITS_LOCK})`);
+            await checkLimits(tx, newShare);
+          }
+          const [share] = await tx
+            .insert(shares)
+            .values({ title, message, expirySeconds, clientIp, createdAt: now() })
+            .returning({ id: shares.id });
+          const created = await tx
+            .insert(files)
+            .values(newFiles.map((file, i) => ({ ...file, ...uploads[i], shareId: share.id, position: i })))
+            .returning({ id: files.id, name: files.name, size: files.size, position: files.position });
+          created.sort((a, b) => a.position - b.position);
+          return { id: share.id, files: created.map(({ position: _, ...file }) => file) };
+        });
+      } catch (err) {
+        // No row points at these uploads, so nothing else would ever remove them.
+        await Promise.allSettled(uploads.map((upload) => storage.abortUpload(upload.storageKey, upload.multipartUploadId)));
+        throw err;
       }
-      return db.transaction(async (tx) => {
-        const [share] = await tx
-          .insert(shares)
-          .values({ title, message, expirySeconds, createdAt: now() })
-          .returning({ id: shares.id });
-        const created = await tx
-          .insert(files)
-          .values(newFiles.map((file, i) => ({ ...file, ...uploads[i], shareId: share.id, position: i })))
-          .returning({ id: files.id, name: files.name, size: files.size, position: files.position });
-        created.sort((a, b) => a.position - b.position);
-        return { id: share.id, files: created.map(({ position: _, ...file }) => file) };
-      });
     },
 
     /** Upload progress of a file in a `pending` share, or null. */
@@ -228,7 +338,12 @@ export function createShareService({
       }
       const newOffset = offset + length;
       if (newOffset > file.size) {
-        throw new ShareError("invalid_chunk", "Chunk runs past the end of the file");
+        // More bytes than the uploader declared: the share fails, and cleanup removes it.
+        await db
+          .update(shares)
+          .set({ status: "abandoned" })
+          .where(and(eq(shares.id, file.shareId), eq(shares.status, "pending")));
+        throw new ShareError("too_large", "More bytes were sent than the file's declared size, so the upload was stopped");
       }
       if (newOffset < file.size && length < MIN_PART_SIZE) {
         throw new ShareError("invalid_chunk", `Chunks before the last must be at least ${MIN_PART_SIZE} bytes`);

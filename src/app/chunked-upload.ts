@@ -58,9 +58,14 @@ export function uploadFile(file: Blob, uploadUrl: string, options: ChunkedUpload
       },
       onShouldRetry(err: DetailedError) {
         const status = err.originalResponse?.getStatus() ?? 0;
-        // Network errors, server errors, a lost offset race and corrupted chunks.
+        // Network errors, server errors, a lost offset race, corrupted chunks and rate limits.
         const retry =
-          status === 0 || status >= 500 || status === 409 || status === 423 || status === CHECKSUM_MISMATCH;
+          status === 0 ||
+          status >= 500 ||
+          status === 409 ||
+          status === 423 ||
+          status === 429 ||
+          status === CHECKSUM_MISMATCH;
         if (retry) options.onRetry?.();
         return retry;
       },

@@ -16,6 +16,7 @@ export function loadConfig(env: Env = process.env) {
     },
     expiry: loadExpiryConfig(env),
     upload: loadUploadConfig(env),
+    limits: loadLimitsConfig(env),
     cleanup: loadCleanupConfig(env),
   };
 }
@@ -69,15 +70,21 @@ export interface UploadConfig {
   parallelFiles: number;
 }
 
-const SIZE = /^([1-9]\d*)(KB|MB|GB)$/;
-const UNIT_BYTES = { KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 };
+const SIZE = /^([1-9]\d*)(KB|MB|GB|TB)$/;
+const UNIT_BYTES = { KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 };
 const MAX_PARALLEL_FILES = 10;
+
+/** Bytes in a size like "64MB" (1MB = 1024 x 1024 bytes), or NaN if it isn't one. */
+function parseSize(value: string): number {
+  const match = SIZE.exec(value);
+  const bytes = match ? Number(match[1]) * UNIT_BYTES[match[2] as keyof typeof UNIT_BYTES] : NaN;
+  return Number.isSafeInteger(bytes) ? bytes : NaN;
+}
 
 /** How browsers upload; throws on any invalid value. */
 export function loadUploadConfig(env: Env = process.env): UploadConfig {
   const chunkSizeValue = env.UPLOAD_CHUNK_SIZE || "64MB";
-  const match = SIZE.exec(chunkSizeValue);
-  const chunkSize = match ? Number(match[1]) * UNIT_BYTES[match[2] as keyof typeof UNIT_BYTES] : NaN;
+  const chunkSize = parseSize(chunkSizeValue);
   if (!(chunkSize >= MIN_PART_SIZE && chunkSize <= MAX_PART_SIZE)) {
     throw new Error(
       `Invalid UPLOAD_CHUNK_SIZE "${chunkSizeValue}": use a size from 5MB to 5GB, like 64MB`,
@@ -92,6 +99,60 @@ export function loadUploadConfig(env: Env = process.env): UploadConfig {
     );
   }
   return { chunkSize, parallelFiles };
+}
+
+/** A size limit, in bytes and as written in `.env` for messages. */
+export interface SizeLimit {
+  bytes: number;
+  value: string;
+}
+
+/** Each limit is null when it's off. */
+export interface LimitsConfig {
+  maxShareSize: SizeLimit | null;
+  maxFilesPerShare: number | null;
+  /** All pending shares plus ready ones that haven't expired. */
+  maxTotalStorage: SizeLimit | null;
+  /** Declared bytes of the shares one client IP created in the last 24 hours. */
+  uploadQuotaPerIp: SizeLimit | null;
+  /** Pending shares plus ready ones that haven't expired, per client IP. */
+  maxActiveSharesPerIp: number | null;
+  /** Requests per minute per client IP. */
+  rateLimitUpload: number | null;
+  rateLimitDownload: number | null;
+}
+
+/** Limits and quotas; each is off when empty. Throws on any invalid value. */
+export function loadLimitsConfig(env: Env = process.env): LimitsConfig {
+  return {
+    maxShareSize: sizeLimit(env, "MAX_SHARE_SIZE"),
+    maxFilesPerShare: countLimit(env, "MAX_FILES_PER_SHARE"),
+    maxTotalStorage: sizeLimit(env, "MAX_TOTAL_STORAGE"),
+    uploadQuotaPerIp: sizeLimit(env, "UPLOAD_QUOTA_PER_IP"),
+    maxActiveSharesPerIp: countLimit(env, "MAX_ACTIVE_SHARES_PER_IP"),
+    rateLimitUpload: countLimit(env, "RATE_LIMIT_UPLOAD"),
+    rateLimitDownload: countLimit(env, "RATE_LIMIT_DOWNLOAD"),
+  };
+}
+
+function sizeLimit(env: Env, name: string): SizeLimit | null {
+  const value = env[name]?.trim();
+  if (!value) return null;
+  const bytes = parseSize(value);
+  if (Number.isNaN(bytes)) {
+    throw new Error(`Invalid ${name} "${value}": use a size in KB, MB, GB or TB, like 500MB or 50GB, or leave it empty for no limit`);
+  }
+  return { bytes, value };
+}
+
+function countLimit(env: Env, name: string): number | null {
+  const value = env[name]?.trim();
+  if (!value) return null;
+  const count = /^[1-9]\d{0,8}$/.test(value) ? Number(value) : NaN;
+  if (Number.isNaN(count)) {
+    throw new Error(`Invalid ${name} "${value}": use a whole number of at least 1, or leave it empty for no limit`);
+  }
+  return count;
 }
 
 export interface CleanupConfig {

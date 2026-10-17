@@ -163,11 +163,13 @@ All of these are set in `.env`. Each is optional and is turned off when left emp
 |---|---|---|
 | `MAX_SHARE_SIZE` | Total size of one share | `50GB` |
 | `MAX_FILES_PER_SHARE` | Files in one share | `500` |
-| `MAX_TOTAL_STORAGE` | Total size of all active shares, counted from the database | off |
+| `MAX_TOTAL_STORAGE` | Total size of all active shares (ready + pending), counted from the database | off |
 | `UPLOAD_QUOTA_PER_IP` | Bytes uploaded per IP per 24h | off |
 | `MAX_ACTIVE_SHARES_PER_IP` | Unexpired shares per IP | off |
 | `RATE_LIMIT_UPLOAD` / `RATE_LIMIT_DOWNLOAD` | Requests per minute per IP | on |
 | `EXPIRY_OPTIONS` / `EXPIRY_DEFAULT` | Expiry presets shown to uploaders | `1d,3d,7d,14d,30d` / `7d` |
+
+Limits are checked when an upload is authorized, before any bytes are sent; pending shares count, so parallel uploads can't race past one. A client that sends more bytes than it declared is cut off and its share fails.
 
 When `ALLOW_PUBLIC_UPLOAD=true`, quotas and rate limits are strongly recommended, and every download page shows an abuse-report link.
 
