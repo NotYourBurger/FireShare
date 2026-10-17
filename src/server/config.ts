@@ -1,3 +1,5 @@
+import { MAX_PART_SIZE, MIN_PART_SIZE } from "./storage/adapter";
+
 type Env = Record<string, string | undefined>;
 
 /** Configuration from the environment (see .env.example). */
@@ -12,6 +14,7 @@ export function loadConfig(env: Env = process.env) {
       secretAccessKey: required(env, "S3_SECRET_ACCESS_KEY"),
     },
     expiry: loadExpiryConfig(env),
+    upload: loadUploadConfig(env),
   };
 }
 
@@ -55,6 +58,38 @@ export function loadExpiryConfig(env: Env = process.env): ExpiryConfig {
     );
   }
   return { options, default: defaultValue };
+}
+
+export interface UploadConfig {
+  /** Bytes per uploaded chunk; also the size of each storage part. */
+  chunkSize: number;
+  /** How many files a browser uploads at once. */
+  parallelFiles: number;
+}
+
+const SIZE = /^([1-9]\d*)(KB|MB|GB)$/;
+const UNIT_BYTES = { KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 };
+const MAX_PARALLEL_FILES = 10;
+
+/** How browsers upload; throws on any invalid value. */
+export function loadUploadConfig(env: Env = process.env): UploadConfig {
+  const chunkSizeValue = env.UPLOAD_CHUNK_SIZE || "64MB";
+  const match = SIZE.exec(chunkSizeValue);
+  const chunkSize = match ? Number(match[1]) * UNIT_BYTES[match[2] as keyof typeof UNIT_BYTES] : NaN;
+  if (!(chunkSize >= MIN_PART_SIZE && chunkSize <= MAX_PART_SIZE)) {
+    throw new Error(
+      `Invalid UPLOAD_CHUNK_SIZE "${chunkSizeValue}": use a size from 5MB to 5GB, like 64MB`,
+    );
+  }
+
+  const parallelValue = env.UPLOAD_PARALLEL_FILES || "3";
+  const parallelFiles = /^\d+$/.test(parallelValue) ? Number(parallelValue) : NaN;
+  if (!(parallelFiles >= 1 && parallelFiles <= MAX_PARALLEL_FILES)) {
+    throw new Error(
+      `Invalid UPLOAD_PARALLEL_FILES "${parallelValue}": use a whole number from 1 to ${MAX_PARALLEL_FILES}`,
+    );
+  }
+  return { chunkSize, parallelFiles };
 }
 
 function required(env: Env, name: string): string {

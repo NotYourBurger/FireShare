@@ -1,6 +1,15 @@
 import { bigint, integer, jsonb, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import type { UploadedPart } from "../storage/adapter";
 
+/** One received chunk: the storage part it became, plus its integrity data. */
+export interface FilePart extends UploadedPart {
+  size: number;
+  /** Hex SHA-256 sent by the browser and checked before the part was written. */
+  sha256: string;
+  /** Computed as the chunk streamed through; combined, they give the file's CRC32. */
+  crc32: number;
+}
+
 export const shares = pgTable("shares", {
   id: uuid("id").primaryKey().defaultRandom(),
   status: text("status", { enum: ["pending", "ready"] }).notNull().default("pending"),
@@ -35,9 +44,17 @@ export const files = pgTable(
     multipartUploadId: text("multipart_upload_id").notNull(),
     /** Bytes received so far. */
     uploadOffset: bigint("upload_offset", { mode: "number" }).notNull().default(0),
-    parts: jsonb("parts").$type<UploadedPart[]>().notNull().default([]),
+    /** In order; each chunk is one part. */
+    parts: jsonb("parts").$type<FilePart[]>().notNull().default([]),
     /** When storage assembled the object; set during finalize. */
     completedAt: timestamp("completed_at", { withTimezone: true }),
+    /**
+     * The file's fingerprint, recorded at finalize: the SHA-256 of its chunk
+     * hashes (hex) and the ETag storage gave the assembled object. Null for
+     * files completed before fingerprints were recorded.
+     */
+    fingerprintHash: text("fingerprint_hash"),
+    fingerprintEtag: text("fingerprint_etag"),
   },
   (table) => [unique().on(table.shareId, table.position)],
 );

@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
-import type { ExpiryConfig } from "./config";
+import type { ExpiryConfig, UploadConfig } from "./config";
 import { ShareError, type NewShare, type ShareErrorCode, type ShareService } from "./shares";
 
 const TUS_VERSION = "1.0.0";
@@ -8,11 +8,15 @@ const MAX_NAME_LENGTH = 255;
 export const MAX_TITLE_LENGTH = 200;
 export const MAX_MESSAGE_LENGTH = 5000;
 const MIME_TYPE = /^[\w.+-]+\/[\w.+-]+$/;
+/** `Upload-Checksum` from the tus checksum extension; only SHA-256 is accepted. */
+const UPLOAD_CHECKSUM = /^sha256 ([A-Za-z0-9+/]{43}=)$/;
 
 const errorStatus: Record<ShareErrorCode, number> = {
   not_found: 404,
   offset_mismatch: 409,
   invalid_chunk: 400,
+  // tus checksum extension: "460 Checksum Mismatch".
+  checksum_mismatch: 460,
   not_finalizable: 409,
 };
 
@@ -20,11 +24,24 @@ const errorStatus: Record<ShareErrorCode, number> = {
  * Framework-independent request handlers. The Next.js route files only
  * forward to these.
  */
-export function createHttpHandlers({ shares, expiry }: { shares: ShareService; expiry: ExpiryConfig }) {
+export function createHttpHandlers({
+  shares,
+  expiry,
+  upload,
+}: {
+  shares: ShareService;
+  expiry: ExpiryConfig;
+  upload: UploadConfig;
+}) {
   return {
-    /** Choices for the upload form. */
+    /** Choices and settings for the upload form. */
     uploadOptions() {
-      return { expiryOptions: expiry.options.map((option) => option.value), expiryDefault: expiry.default };
+      return {
+        expiryOptions: expiry.options.map((option) => option.value),
+        expiryDefault: expiry.default,
+        chunkSize: upload.chunkSize,
+        parallelFiles: upload.parallelFiles,
+      };
     },
 
     /** POST /api/shares — authorizes and creates a `pending` share. */
@@ -42,7 +59,12 @@ export function createHttpHandlers({ shares, expiry }: { shares: ShareService; e
     async optionsUpload() {
       return new Response(null, {
         status: 204,
-        headers: { "Tus-Resumable": TUS_VERSION, "Tus-Version": TUS_VERSION },
+        headers: {
+          "Tus-Resumable": TUS_VERSION,
+          "Tus-Version": TUS_VERSION,
+          "Tus-Extension": "checksum",
+          "Tus-Checksum-Algorithm": "sha256",
+        },
       });
     },
 
@@ -59,20 +81,25 @@ export function createHttpHandlers({ shares, expiry }: { shares: ShareService; e
       });
     },
 
-    /** PATCH /api/uploads/:id — tus chunk, streamed straight into storage. */
+    /**
+     * PATCH /api/uploads/:id — tus chunk, streamed straight into storage.
+     * Every chunk must carry its SHA-256 in `Upload-Checksum`.
+     */
     async patchUpload(req: Request, uploadId: string) {
       const rejected = checkTusVersion(req);
       if (rejected) return rejected;
       if (req.headers.get("Content-Type") !== "application/offset+octet-stream") return tus(415);
       const offset = parseNonNegativeInt(req.headers.get("Upload-Offset"));
       const length = parseNonNegativeInt(req.headers.get("Content-Length"));
-      if (offset === null || length === null) return tus(400);
+      const checksum = UPLOAD_CHECKSUM.exec(req.headers.get("Upload-Checksum") ?? "");
+      if (offset === null || length === null || !checksum) return tus(400);
+      const sha256 = Buffer.from(checksum[1], "base64").toString("hex");
 
       const body = req.body
         ? Readable.fromWeb(req.body as NodeReadableStream<Uint8Array>)
         : Readable.from([]);
       try {
-        const newOffset = await shares.writeChunk(uploadId, offset, body, length);
+        const newOffset = await shares.writeChunk(uploadId, offset, body, length, sha256);
         return tus(204, { "Upload-Offset": String(newOffset) });
       } catch (err) {
         body.destroy();

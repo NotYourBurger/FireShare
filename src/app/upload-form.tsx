@@ -1,52 +1,168 @@
 "use client";
 
-import { useState } from "react";
-import { Upload } from "tus-js-client";
+import { useEffect, useState } from "react";
+import { uploadFile } from "./chunked-upload";
 import { formatBytes, formatExpiry } from "./format";
+import {
+  clearPendingUpload,
+  loadPendingUpload,
+  matchFiles,
+  savePendingUpload,
+  type PendingUpload,
+} from "./pending-upload";
 
-const CHUNK_SIZE = 64 * 1024 * 1024;
-const PARALLEL_UPLOADS = 3;
 // Keep in step with MAX_TITLE_LENGTH and MAX_MESSAGE_LENGTH in src/server/http.ts.
 const MAX_TITLE_LENGTH = 200;
 const MAX_MESSAGE_LENGTH = 5000;
 
-type State =
-  | { step: "select" }
-  | { step: "uploading"; progress: number }
-  | { step: "done"; url: string; expiry: string }
-  | { step: "failed"; message: string };
+type FileStatus = "waiting" | "uploading" | "retrying" | "done" | "failed" | "paused";
 
-export function UploadForm({ expiryOptions, expiryDefault }: { expiryOptions: string[]; expiryDefault: string }) {
+interface FileProgress {
+  name: string;
+  size: number;
+  sent: number;
+  status: FileStatus;
+}
+
+/** A created share being uploaded; a null file has already fully arrived. */
+interface Job {
+  pending: PendingUpload;
+  files: (File | null)[];
+}
+
+type State =
+  | { step: "select"; error?: string }
+  | { step: "resume"; pending: PendingUpload; offsets: number[]; picked: (File | undefined)[]; error?: string }
+  | { step: "uploading"; progress: FileProgress[] }
+  | { step: "failed"; job: Job; progress: FileProgress[]; message: string }
+  | { step: "done"; url: string; expiry: string };
+
+export function UploadForm({
+  expiryOptions,
+  expiryDefault,
+  chunkSize,
+  parallelFiles,
+}: {
+  expiryOptions: string[];
+  expiryDefault: string;
+  chunkSize: number;
+  parallelFiles: number;
+}) {
   const [files, setFiles] = useState<File[]>([]);
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
   const [expiry, setExpiry] = useState(expiryDefault);
   const [state, setState] = useState<State>({ step: "select" });
 
+  // Offer to resume an upload this browser didn't finish.
+  useEffect(() => {
+    const pending = loadPendingUpload();
+    if (!pending) return;
+    let cancelled = false;
+    Promise.all(pending.files.map((file) => uploadOffset(file.uploadUrl)))
+      .then((offsets) => {
+        if (cancelled) return;
+        if (offsets.some((offset) => offset === null)) {
+          // The share was finalized or removed in the meantime.
+          clearPendingUpload();
+          return;
+        }
+        setState({ step: "resume", pending, offsets: offsets as number[], picked: pending.files.map(() => undefined) });
+      })
+      .catch(() => {
+        // Server unreachable: keep the record for the next visit.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   async function share() {
     if (files.length === 0) return;
-    setState({ step: "uploading", progress: 0 });
+    setState({
+      step: "uploading",
+      progress: files.map(({ name, size }) => ({ name, size, sent: 0, status: "waiting" })),
+    });
+    let created;
     try {
-      const created = await postJson("/api/shares", {
+      created = await postJson("/api/shares", {
         title,
         message,
         expiry,
         files: files.map((file) => ({ name: file.name, size: file.size, type: file.type })),
       });
-      const total = files.reduce((sum, file) => sum + file.size, 0);
-      const sent = files.map(() => 0);
-      await inParallel(files, PARALLEL_UPLOADS, (file, i) =>
-        upload(file, new URL(created.files[i].uploadUrl, location.href).href, (bytes) => {
-          sent[i] = bytes;
-          const done = sent.reduce((sum, n) => sum + n, 0);
-          setState({ step: "uploading", progress: total ? done / total : 1 });
-        }),
-      );
-      const { path } = await postJson(`/api/shares/${created.id}/finalize`);
-      setState({ step: "done", url: new URL(path, location.href).href, expiry });
     } catch (err) {
-      setState({ step: "failed", message: err instanceof Error ? err.message : String(err) });
+      setState({ step: "select", error: errorMessage(err) });
+      return;
     }
+    const pending: PendingUpload = {
+      shareId: created.id,
+      expiry,
+      files: files.map((file, i) => ({
+        name: file.name,
+        size: file.size,
+        lastModified: file.lastModified,
+        uploadUrl: new URL(created.files[i].uploadUrl, location.href).href,
+      })),
+    };
+    savePendingUpload(pending);
+    await run({ pending, files });
+  }
+
+  /** Uploads every file of the job that hasn't fully arrived, then finalizes the share. */
+  async function run(job: Job) {
+    const progress: FileProgress[] = job.pending.files.map(({ name, size }, i) => ({
+      name,
+      size,
+      sent: job.files[i] ? 0 : size,
+      status: job.files[i] ? "waiting" : "done",
+    }));
+    // One failed file stops the others; "Try again" resumes them all.
+    const abort = new AbortController();
+    const update = (i: number, change: Partial<FileProgress>) => {
+      if (abort.signal.aborted) return;
+      progress[i] = { ...progress[i], ...change };
+      setState({ step: "uploading", progress: [...progress] });
+    };
+    setState({ step: "uploading", progress: [...progress] });
+
+    const queue = job.files.flatMap((file, i) => (file ? [i] : []));
+    async function worker() {
+      for (let i = queue.shift(); i !== undefined && !abort.signal.aborted; i = queue.shift()) {
+        update(i, { status: "uploading" });
+        try {
+          await uploadFile(job.files[i]!, job.pending.files[i].uploadUrl, {
+            chunkSize,
+            signal: abort.signal,
+            onProgress: (sent) => update(i, { sent }),
+            onRetry: () => update(i, { status: "retrying" }),
+            onChunkAccepted: () => update(i, { status: "uploading" }),
+          });
+          update(i, { status: "done", sent: progress[i].size });
+        } catch (err) {
+          update(i, { status: "failed" });
+          abort.abort(err);
+        }
+      }
+    }
+
+    try {
+      await Promise.all(Array.from({ length: Math.min(parallelFiles, queue.length) }, worker));
+      if (abort.signal.aborted) throw abort.signal.reason;
+      const { path } = await postJson(`/api/shares/${job.pending.shareId}/finalize`);
+      clearPendingUpload();
+      setState({ step: "done", url: new URL(path, location.href).href, expiry: job.pending.expiry });
+    } catch (err) {
+      const stopped = progress.map((file) =>
+        file.status === "done" || file.status === "failed" ? file : { ...file, status: "paused" as const },
+      );
+      setState({ step: "failed", job, progress: stopped, message: errorMessage(err) });
+    }
+  }
+
+  function startOver() {
+    clearPendingUpload();
+    setState({ step: "select" });
   }
 
   if (state.step === "done") {
@@ -73,13 +189,95 @@ export function UploadForm({ expiryOptions, expiryDefault }: { expiryOptions: st
     );
   }
 
-  const uploading = state.step === "uploading";
+  if (state.step === "uploading" || state.step === "failed") {
+    return (
+      <div className="card">
+        <UploadProgress progress={state.progress} />
+        {state.step === "failed" && (
+          <>
+            <p className="error">Upload failed: {state.message}</p>
+            <div className="actions">
+              <button onClick={() => run(state.job)}>Try again</button>
+              <button className="secondary" onClick={startOver}>
+                Start over
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (state.step === "resume") {
+    const { pending, offsets, picked } = state;
+    const missing = pending.files.filter((file, i) => offsets[i] < file.size && !picked[i]);
+    return (
+      <div className="card">
+        <div>
+          <strong>Finish your upload</strong>
+          <p className="muted">
+            {missing.length > 0
+              ? "An upload from this browser didn't finish. Select the same files again to continue where it stopped."
+              : "An upload from this browser didn't finish. Everything is ready to continue."}
+          </p>
+        </div>
+        <input
+          type="file"
+          multiple
+          onChange={(e) => {
+            const chosen = Array.from(e.target.files ?? []);
+            e.target.value = "";
+            const matched = matchFiles(pending, chosen);
+            const unknown = chosen.filter((file) => !matched.includes(file));
+            setState({
+              ...state,
+              picked: picked.map((file, i) => matched[i] ?? file),
+              error: unknown.length
+                ? `Not part of this upload, or changed since: ${unknown.map((file) => file.name).join(", ")}`
+                : undefined,
+            });
+          }}
+          aria-label="Select the same files again"
+        />
+        <ul className="files">
+          {pending.files.map((file, i) => (
+            <li key={i}>
+              <div className="file-info">
+                <span className="file-name">{file.name}</span>
+                <span className="muted">
+                  {offsets[i] >= file.size
+                    ? `${formatBytes(file.size)} · uploaded`
+                    : `${formatBytes(offsets[i])} of ${formatBytes(file.size)} uploaded · ${
+                        picked[i] ? "ready to continue" : "select this file"
+                      }`}
+                </span>
+              </div>
+            </li>
+          ))}
+        </ul>
+        {state.error && <p className="error">{state.error}</p>}
+        <div className="actions">
+          <button
+            disabled={missing.length > 0}
+            onClick={() =>
+              run({ pending, files: pending.files.map((file, i) => (offsets[i] < file.size ? picked[i]! : null)) })
+            }
+          >
+            Continue upload
+          </button>
+          <button className="secondary" onClick={startOver}>
+            Discard
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="card">
       <input
         type="file"
         multiple
-        disabled={uploading}
         onChange={(e) => {
           const picked = Array.from(e.target.files ?? []);
           setFiles((current) => [...current, ...picked]);
@@ -97,7 +295,6 @@ export function UploadForm({ expiryOptions, expiryDefault }: { expiryOptions: st
               </div>
               <button
                 className="secondary"
-                disabled={uploading}
                 onClick={() => setFiles((current) => current.filter((_, j) => j !== i))}
                 aria-label={`Remove ${file.name}`}
               >
@@ -111,12 +308,7 @@ export function UploadForm({ expiryOptions, expiryDefault }: { expiryOptions: st
         <span>
           Title <span className="muted">(optional)</span>
         </span>
-        <input
-          value={title}
-          maxLength={MAX_TITLE_LENGTH}
-          disabled={uploading}
-          onChange={(e) => setTitle(e.target.value)}
-        />
+        <input value={title} maxLength={MAX_TITLE_LENGTH} onChange={(e) => setTitle(e.target.value)} />
       </label>
       <label className="field">
         <span>
@@ -126,13 +318,12 @@ export function UploadForm({ expiryOptions, expiryDefault }: { expiryOptions: st
           value={message}
           rows={3}
           maxLength={MAX_MESSAGE_LENGTH}
-          disabled={uploading}
           onChange={(e) => setMessage(e.target.value)}
         />
       </label>
       <label className="field">
         <span>Link expires after</span>
-        <select value={expiry} disabled={uploading} onChange={(e) => setExpiry(e.target.value)}>
+        <select value={expiry} onChange={(e) => setExpiry(e.target.value)}>
           {expiryOptions.map((option) => (
             <option key={option} value={option}>
               {formatExpiry(option)}
@@ -140,44 +331,60 @@ export function UploadForm({ expiryOptions, expiryDefault }: { expiryOptions: st
           ))}
         </select>
       </label>
-      {uploading && (
-        <div>
-          <progress value={state.progress} max={1} />
-          <span className="muted">{Math.floor(state.progress * 100)}%</span>
-        </div>
-      )}
-      {state.step === "failed" && <p className="error">Upload failed: {state.message}</p>}
-      <button disabled={files.length === 0 || uploading} onClick={share}>
-        {uploading ? "Uploading…" : "Upload and get link"}
+      {state.error && <p className="error">Upload failed: {state.error}</p>}
+      <button disabled={files.length === 0} onClick={share}>
+        Upload and get link
       </button>
     </div>
   );
 }
 
-/** Runs `task` over `items` with at most `limit` running at once; stops at the first failure. */
-async function inParallel<T>(items: T[], limit: number, task: (item: T, index: number) => Promise<void>) {
-  let next = 0;
-  async function worker() {
-    while (next < items.length) {
-      const i = next++;
-      await task(items[i], i);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+const STATUS_LABEL: Record<FileStatus, string> = {
+  waiting: "Waiting",
+  uploading: "Uploading",
+  retrying: "Retrying…",
+  done: "Done",
+  failed: "Failed",
+  paused: "Paused",
+};
+
+/** Overall progress, then each file's state and progress. */
+export function UploadProgress({ progress }: { progress: FileProgress[] }) {
+  const total = progress.reduce((sum, file) => sum + file.size, 0);
+  const sent = progress.reduce((sum, file) => sum + file.sent, 0);
+  const fraction = total ? sent / total : progress.every((file) => file.status === "done") ? 1 : 0;
+  return (
+    <>
+      <div>
+        <progress value={fraction} max={1} aria-label="Overall progress" />
+        <span className="muted">
+          {Math.floor(fraction * 100)}% · {formatBytes(sent)} of {formatBytes(total)}
+        </span>
+      </div>
+      <ul className="files">
+        {progress.map((file, i) => (
+          <li key={i} data-status={file.status}>
+            <div className="file-info">
+              <span className="file-name">{file.name}</span>
+              <progress value={file.size ? file.sent / file.size : file.status === "done" ? 1 : 0} max={1} />
+              <span className="muted">
+                {STATUS_LABEL[file.status]}
+                {file.status !== "done" && file.size > 0 && ` · ${Math.floor((file.sent / file.size) * 100)}%`}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
 }
 
-function upload(file: File, uploadUrl: string, onProgress: (bytesSent: number) => void) {
-  return new Promise<void>((resolve, reject) => {
-    new Upload(file, {
-      uploadUrl,
-      chunkSize: CHUNK_SIZE,
-      retryDelays: [0, 1000, 3000, 5000],
-      storeFingerprintForResuming: false,
-      onProgress: (sent) => onProgress(sent),
-      onSuccess: () => resolve(),
-      onError: reject,
-    }).start();
-  });
+/** How many bytes of a pending upload the server has, or null if it no longer exists. */
+async function uploadOffset(uploadUrl: string): Promise<number | null> {
+  const res = await fetch(uploadUrl, { method: "HEAD", headers: { "Tus-Resumable": "1.0.0" }, cache: "no-store" });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Request failed (${res.status})`);
+  return Number(res.headers.get("Upload-Offset"));
 }
 
 async function postJson(url: string, body?: unknown) {
@@ -189,4 +396,8 @@ async function postJson(url: string, body?: unknown) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
   return data;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
