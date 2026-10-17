@@ -7,6 +7,7 @@ import { createHttpHandlers, MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, parseRange, t
 import { createShareService } from "./shares";
 import { createMemoryStorage } from "./storage/memory";
 import { MIN_PART_SIZE, type StorageAdapter } from "./storage/adapter";
+import { unzip } from "./test-unzip";
 import { generateToken } from "./tokens";
 
 let http: HttpHandlers;
@@ -424,6 +425,105 @@ describe("HTTP API", () => {
       }
       expect(errors).toHaveBeenCalledTimes(2);
       errors.mockRestore();
+    });
+  });
+
+  describe("download all", () => {
+    /** Creates, uploads and finalizes a share; returns its link path. */
+    async function shareAll(files: Record<string, string | Buffer>, fields: Record<string, unknown> = {}) {
+      const names = Object.keys(files);
+      const created = await (
+        await createShare(names.map((name) => ({ name, size: Buffer.byteLength(files[name]) })), fields)
+      ).json();
+      for (const [i, name] of names.entries()) {
+        const data = Buffer.from(files[name]);
+        for (let offset = 0; offset < data.length; offset += MIN_PART_SIZE) {
+          await patch(created.files[i].id, offset, data.subarray(offset, offset + MIN_PART_SIZE));
+        }
+        if (data.length === 0) await patch(created.files[i].id, 0, "");
+      }
+      const { path } = await (await finalize(created.id)).json();
+      return path as string;
+    }
+
+    function downloadAll(path: string, headers: Record<string, string> = {}) {
+      const token = path.slice("/d/".length);
+      return http.downloadAll(new Request(`${origin}${path}/all`, { headers }), token);
+    }
+
+    it("streams the whole share as a zip with an exact length, as a safe attachment", async () => {
+      const path = await shareAll({ "a.txt": "hello", "日本語.txt": "world" }, { title: "Shot 12" });
+      const res = await downloadAll(path);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Type")).toBe("application/zip");
+      expect(res.headers.get("Content-Disposition")).toBe(
+        `attachment; filename="Shot 12.zip"; filename*=UTF-8''Shot%2012.zip`,
+      );
+      expect(res.headers.get("Accept-Ranges")).toBe("bytes");
+      expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+      const data = Buffer.from(await res.arrayBuffer());
+      expect(res.headers.get("Content-Length")).toBe(String(data.length));
+      const entries = await unzip(data);
+      expect(entries.map((entry) => entry.name)).toEqual(["a.txt", "日本語.txt"]);
+      expect((await entries[1].data()).toString()).toBe("world");
+    });
+
+    it("resumes an interrupted zip download into a byte-identical archive", async () => {
+      const big = Buffer.alloc(MIN_PART_SIZE + 1000);
+      for (let i = 0; i < big.length; i++) big[i] = (i * 31) % 251;
+      const path = await shareAll({ "big.bin": big, "small.txt": "after" });
+
+      const first = await downloadAll(path);
+      const whole = Buffer.from(await first.arrayBuffer());
+      const half = whole.subarray(0, Math.floor(whole.length / 2));
+      const rest = await downloadAll(path, { Range: `bytes=${half.length}-`, "If-Range": first.headers.get("ETag")! });
+      expect(rest.status).toBe(206);
+      expect(rest.headers.get("Content-Range")).toBe(`bytes ${half.length}-${whole.length - 1}/${whole.length}`);
+      const resumed = Buffer.concat([half, Buffer.from(await rest.arrayBuffer())]);
+      expect(resumed.equals(whole)).toBe(true);
+      expect((await (await unzip(resumed))[0].data()).equals(big)).toBe(true);
+    });
+
+    it("streams from storage instead of assembling the zip", async () => {
+      const path = await shareAll({ "a.txt": "x", "b.txt": "y" });
+      let pulled = 0;
+      storage.getReadStream = async () =>
+        Readable.from(
+          (function* () {
+            for (let i = 0; i < 10_000; i++, pulled++) yield Buffer.alloc(64 * 1024);
+          })(),
+        );
+
+      const res = await downloadAll(path);
+      const reader = res.body!.getReader();
+      for (let i = 0; i < 3; i++) await reader.read();
+      await reader.cancel();
+      expect(pulled).toBeLessThan(100);
+    });
+
+    it("refuses with a clear page when any stored file no longer matches its fingerprint", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const path = await shareAll({ "a.txt": "hello", "b.txt": "world" });
+      const head = storage.head;
+      let calls = 0;
+      storage.head = async (key) => {
+        const info = await head(key);
+        return info && (++calls === 2 ? { ...info, etag: '"changed"' } : info);
+      };
+
+      const res = await downloadAll(path);
+      expect(res.status).toBe(409);
+      expect(res.headers.get("Content-Disposition")).toBeNull();
+      expect(await res.text()).toContain("can't be downloaded");
+      expect(errors).toHaveBeenCalledOnce();
+      errors.mockRestore();
+    });
+
+    it("answers expired and unknown links like single-file downloads do", async () => {
+      const path = await shareAll({ "a.txt": "a" });
+      expect((await http.downloadAll(new Request(`${origin}/d/x/all`), generateToken())).status).toBe(404);
+      advanceHours(24);
+      expect((await downloadAll(path)).status).toBe(410);
     });
   });
 

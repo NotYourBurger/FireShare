@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { buffer } from "node:stream/consumers";
@@ -10,6 +11,7 @@ import { createShareService, ShareError, type Download, type NewFile, type NewSh
 import { MIN_PART_SIZE } from "./storage/adapter";
 import type { StorageAdapter } from "./storage/adapter";
 import { createMemoryStorage } from "./storage/memory";
+import { unzip } from "./test-unzip";
 import { generateToken, hashToken } from "./tokens";
 
 let db: Database;
@@ -402,6 +404,7 @@ describe("share service", () => {
         title: "Final renders",
         message,
         files: share.files,
+        downloadAll: true,
       });
       for (const [i, content] of ["bb", "aaa", ""].entries()) {
         const download = await service.openDownload(token, share.files[i].id);
@@ -483,6 +486,109 @@ describe("share service", () => {
 
     it("shows nothing for an unknown token", async () => {
       expect(await service.viewShare(generateToken())).toBeNull();
+    });
+  });
+
+  describe("download all", () => {
+    let keys: string[];
+    let errors: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      keys = [];
+      const createUpload = storage.createUpload;
+      storage.createUpload = (key, type) => (keys.push(key), createUpload(key, type));
+      errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    afterEach(() => errors.mockRestore());
+
+    async function readyShare(names: string[], contents: string[], title: string | null = null) {
+      const share = await service.createShare({
+        ...withFiles(names.map((name, i) => file(name, contents[i].length))),
+        title,
+      });
+      await uploadAll(share, contents);
+      const { token } = await service.finalize(share.id);
+      return token;
+    }
+
+    const archiveOf = async (token: string) => buffer(await ((await service.openArchive(token)) as Download).read());
+
+    it("zips every file of the share, in the uploader's order, under its own name", async () => {
+      const token = await readyShare(["b.txt", "日本語.txt", "empty.bin"], ["bb", "aaa", ""], "Final renders");
+      const archive = (await service.openArchive(token)) as Download;
+      expect(archive).toMatchObject({ name: "Final renders.zip", contentType: "application/zip" });
+
+      const data = await buffer(await archive.read());
+      expect(data.length).toBe(archive.size);
+      const entries = await unzip(data);
+      expect(entries.map((entry) => entry.name)).toEqual(["b.txt", "日本語.txt", "empty.bin"]);
+      expect(await Promise.all(entries.map(async (entry) => (await entry.data()).toString()))).toEqual(["bb", "aaa", ""]);
+      // The CRC32s were recorded at upload, not computed now.
+      expect(entries.map((entry) => entry.crc32)).toEqual(["bb", "aaa", ""].map((text) => crc32(Buffer.from(text))));
+    });
+
+    it("gives duplicate and unsafe names distinct plain file names", async () => {
+      const token = await readyShare(["a.txt", "A.txt", "../../etc/passwd"], ["1", "2", "3"]);
+      const entries = await unzip(await archiveOf(token));
+      expect(entries.map((entry) => entry.name)).toEqual(["a.txt", "A (2).txt", ".._.._etc_passwd"]);
+      expect((await service.openArchive(token)) as Download).toMatchObject({ name: "Shared files.zip" });
+    });
+
+    it("has a stable ETag and the same bytes on every request", async () => {
+      const token = await readyShare(["a.txt", "b.txt"], ["hello", "world"]);
+      const first = (await service.openArchive(token)) as Download;
+      advance(3600);
+      const second = (await service.openArchive(token)) as Download;
+      expect(second.etag).toBe(first.etag);
+      expect(first.etag).toMatch(/^"[0-9a-f]{64}"$/);
+      expect((await buffer(await first.read())).equals(await buffer(await second.read()))).toBe(true);
+    });
+
+    it("checks every file's fingerprint before serving anything", async () => {
+      const token = await readyShare(["a.txt", "b.txt"], ["hello", "world"]);
+      const { uploadId } = await storage.createUpload(keys[1]);
+      const part = await storage.writePart(keys[1], uploadId, 1, body("WORLD"), 5);
+      await storage.completeUpload(keys[1], uploadId, [part]);
+
+      await expect(service.openArchive(token)).rejects.toMatchObject({ code: "tampered" });
+      expect(errors).toHaveBeenCalledWith(expect.stringMatching(/ETag/));
+    });
+
+    it("fails the stream instead of serving a file replaced after the check", async () => {
+      const token = await readyShare(["a.txt", "b.txt"], ["hello", "world"]);
+      const archive = (await service.openArchive(token)) as Download;
+      const { uploadId } = await storage.createUpload(keys[1]);
+      const part = await storage.writePart(keys[1], uploadId, 1, body("WORLD"), 5);
+      await storage.completeUpload(keys[1], uploadId, [part]);
+
+      await expect(buffer(await archive.read())).rejects.toMatchObject({ code: "tampered" });
+    });
+
+    it("answers like an unknown token when a stored file has gone missing", async () => {
+      const token = await readyShare(["a.txt", "b.txt"], ["hello", "world"]);
+      await storage.delete(keys[1]);
+      expect(await service.openArchive(token)).toBeNull();
+    });
+
+    it("isn't offered for files uploaded before CRC32s were recorded", async () => {
+      const token = await readyShare(["a.txt", "b.txt"], ["hello", "world"]);
+      expect(await service.viewShare(token)).toMatchObject({ downloadAll: true });
+      const [row] = await db.select().from(schema.files).where(eq(schema.files.name, "b.txt"));
+      await db
+        .update(schema.files)
+        .set({ parts: row.parts.map(({ crc32: _, ...part }) => part as typeof part & { crc32: number }) })
+        .where(eq(schema.files.id, row.id));
+
+      expect(await service.viewShare(token)).toMatchObject({ downloadAll: false });
+      expect(await service.openArchive(token)).toBeNull();
+    });
+
+    it("reports an expired share as expired, and an unknown token as nothing", async () => {
+      const token = await readyShare(["a.txt"], ["a"]);
+      expect(await service.openArchive(generateToken())).toBeNull();
+      advance(7 * DAY);
+      expect(await service.openArchive(token)).toBe("expired");
     });
   });
 

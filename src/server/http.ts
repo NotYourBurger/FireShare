@@ -142,6 +142,22 @@ export function createHttpHandlers({
         throw err;
       }
     },
+
+    /**
+     * GET /d/:token/all — streams the whole share as one zip, with an exact
+     * length and byte ranges like a single file, so it resumes too.
+     */
+    async downloadAll(req: Request, token: string) {
+      try {
+        const archive = await shares.openArchive(token);
+        if (archive === "expired") return html(410, EXPIRED_PAGE);
+        if (!archive) return html(404, NOT_FOUND_PAGE);
+        return await serveFile(req, archive);
+      } catch (err) {
+        if (err instanceof ShareError && err.code === "tampered") return html(errorStatus.tampered, TAMPERED_PAGE);
+        throw err;
+      }
+    },
   };
 }
 
@@ -219,7 +235,7 @@ const NOT_FOUND_PAGE = page(
 const TAMPERED_PAGE = page(
   "File unavailable",
   "This file can't be downloaded",
-  "The stored copy has changed since it was shared, so FireShare won't serve it. Ask the sender to share it again.",
+  "A stored copy has changed since it was shared, so FireShare won't serve it. Ask the sender to share it again.",
 );
 
 const EXPIRED_PAGE = page(
