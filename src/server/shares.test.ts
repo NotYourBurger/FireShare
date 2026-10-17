@@ -228,7 +228,9 @@ describe("share service", () => {
         expect.objectContaining({ partNumber: 1, size: first.length, sha256: sha256(first), crc32: crc32(first) }),
         expect.objectContaining({ partNumber: 2, size: second.length, sha256: sha256(second), crc32: crc32(second) }),
       ]);
-      expect(combineCrc32(row.parts)).toBe(crc32(Buffer.concat([first, second])));
+      expect(combineCrc32(row.parts as { size: number; crc32: number }[])).toBe(
+        crc32(Buffer.concat([first, second])),
+      );
     });
   });
 
@@ -574,17 +576,20 @@ describe("share service", () => {
       expect(await service.openArchive(token)).toBeNull();
     });
 
-    it("isn't offered for files uploaded before CRC32s were recorded", async () => {
+    it("streams a store-only zip without a known size or ETag when any file lacks a CRC32", async () => {
       const token = await readyShare(["a.txt", "b.txt"], ["hello", "world"]);
-      expect(await service.viewShare(token)).toMatchObject({ downloadAll: true });
       const [row] = await db.select().from(schema.files).where(eq(schema.files.name, "b.txt"));
       await db
         .update(schema.files)
-        .set({ parts: row.parts.map(({ crc32: _, ...part }) => part as typeof part & { crc32: number }) })
+        .set({ parts: row.parts.map(({ crc32: _, ...part }) => part) })
         .where(eq(schema.files.id, row.id));
 
-      expect(await service.viewShare(token)).toMatchObject({ downloadAll: false });
-      expect(await service.openArchive(token)).toBeNull();
+      expect(await service.viewShare(token)).toMatchObject({ downloadAll: true });
+      const archive = await service.openArchive(token);
+      expect(archive).toMatchObject({ name: "Shared files.zip", size: null, etag: null, contentType: "application/zip" });
+      const entries = await unzip(await buffer(await (archive as Download).read()));
+      expect(entries.map((entry) => entry.name)).toEqual(["a.txt", "b.txt"]);
+      expect(await Promise.all(entries.map(async (entry) => (await entry.data()).toString()))).toEqual(["hello", "world"]);
     });
 
     it("reports an expired share as expired, and an unknown token as nothing", async () => {
@@ -739,6 +744,88 @@ describe("share service", () => {
       const second = await readyShare();
       await service.deleteShare(first.managementToken);
       expect(await service.viewShare(second.token)).toMatchObject({ title: "Shot 12" });
+    });
+  });
+
+  describe("direct transfer mode", () => {
+    it("signs only as many uploadPart URLs as the declared size and remaining parts require", async () => {
+      const memStorage = createMemoryStorage();
+      storage = memStorage;
+      service = createShareService({ db, storage, now: () => clock });
+
+      const size = MIN_PART_SIZE + 5;
+      const share = await service.createShare(
+        withFiles([file("big.bin", size), file("empty.bin", 0)]),
+      );
+      const [bigFile, emptyFile] = share.files;
+
+      const emptyDirect = await service.getDirectUpload(emptyFile.id, MIN_PART_SIZE);
+      expect(emptyDirect).toEqual({ size: 0, offset: 0, partUrls: [] });
+
+      const initial = await service.getDirectUpload(bigFile.id, MIN_PART_SIZE);
+      expect(initial?.size).toBe(size);
+      expect(initial?.offset).toBe(0);
+      expect(initial?.partUrls).toHaveLength(2);
+      expect(new URL(initial!.partUrls[0]).searchParams.get("partNumber")).toBe("1");
+      expect(new URL(initial!.partUrls[1]).searchParams.get("partNumber")).toBe("2");
+
+      // Upload part 1 directly to storage via the presigned URL.
+      const part1 = Buffer.alloc(MIN_PART_SIZE, 0x61);
+      const put1 = await memStorage.fetch(new Request(initial!.partUrls[0], { method: "PUT", body: part1 }));
+      expect(put1.status).toBe(200);
+
+      // Resume inspects listParts and signs only the remaining part.
+      expect(await service.getUpload(bigFile.id, MIN_PART_SIZE)).toEqual({ size, offset: MIN_PART_SIZE });
+      const resumed = await service.getDirectUpload(bigFile.id, MIN_PART_SIZE);
+      expect(resumed?.offset).toBe(MIN_PART_SIZE);
+      expect(resumed?.partUrls).toHaveLength(1);
+      expect(new URL(resumed!.partUrls[0]).searchParams.get("partNumber")).toBe("2");
+
+      // Finalizing before part 2 is uploaded leaves the share pending and the upload resumable.
+      await expect(service.finalize(share.id, MIN_PART_SIZE)).rejects.toThrow(
+        expect.objectContaining({ code: "not_finalizable" }),
+      );
+
+      // Upload part 2 and finalize.
+      const part2 = Buffer.from("hello");
+      const put2 = await memStorage.fetch(new Request(resumed!.partUrls[0], { method: "PUT", body: part2 }));
+      expect(put2.status).toBe(200);
+
+      const { token } = await service.finalize(share.id, MIN_PART_SIZE);
+      const [storedBig] = await db.select().from(schema.files).where(eq(schema.files.id, bigFile.id));
+      expect(storedBig.fingerprintHash).toBeNull();
+      expect(storedBig.fingerprintEtag).toBeTruthy();
+
+      const download = (await service.openDownload(token, bigFile.id)) as Download;
+      const getUrl = await download.presign('attachment; filename="big.bin"');
+      const getRes = await memStorage.fetch(new Request(getUrl, { method: "GET" }));
+      expect(getRes.status).toBe(200);
+      expect(getRes.headers.get("Content-Disposition")).toBe('attachment; filename="big.bin"');
+      expect(Buffer.from(await getRes.arrayBuffer()).equals(Buffer.concat([part1, part2]))).toBe(true);
+    });
+
+    it("rejects and deletes a direct-mode file whose uploaded size doesn't match the declared size", async () => {
+      const memStorage = createMemoryStorage();
+      storage = memStorage;
+      service = createShareService({ db, storage, now: () => clock });
+
+      const share = await service.createShare(withFiles([file("wrong.bin", 10)]));
+      const [f] = share.files;
+      const direct = await service.getDirectUpload(f.id, MIN_PART_SIZE);
+      expect(direct?.partUrls).toHaveLength(1);
+
+      // Upload 6 bytes instead of the declared 10 bytes.
+      const putRes = await memStorage.fetch(
+        new Request(direct!.partUrls[0], { method: "PUT", body: Buffer.from("123456") }),
+      );
+      expect(putRes.status).toBe(200);
+
+      await expect(service.finalize(share.id, MIN_PART_SIZE)).rejects.toThrow(
+        expect.objectContaining({ code: "invalid_chunk" }),
+      );
+      const [row] = await db.select().from(schema.files).where(eq(schema.files.id, f.id));
+      expect(await storage.head(row.storageKey)).toBeNull();
+      expect(await storage.listParts(row.storageKey, row.multipartUploadId)).toEqual([]);
     });
   });
 });

@@ -7,30 +7,47 @@ import {
   GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
+  ListPartsCommand,
+  PutBucketCorsCommand,
   S3Client,
   S3ServiceException,
   UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import type { Readable } from "node:stream";
-import { ObjectChangedError, type StorageAdapter } from "./adapter";
+import { ObjectChangedError, type StorageAdapter, type StoredPart } from "./adapter";
 import { exactLength } from "./exact-length";
+import { presignS3Url } from "./presign";
 
 export interface S3StorageConfig {
   endpoint: string;
+  /** Where browsers reach storage for presigned URLs; defaults to `endpoint`. */
+  directEndpoint?: string | null;
+  /** Origin the bucket's CORS rule allows when `ensureBucket` runs. */
+  corsOrigin?: string | null;
   region: string;
   bucket: string;
   accessKeyId: string;
   secretAccessKey: string;
+  now?: () => Date;
 }
 
 export interface S3Storage extends StorageAdapter {
-  /** Creates the bucket if it doesn't exist yet. */
+  /** Creates the bucket if it doesn't exist yet, and applies `corsOrigin` when configured. */
   ensureBucket(): Promise<void>;
+  ensureCors(origin: string): Promise<void>;
 }
 
 /** The v1 storage driver: any S3-compatible API (RustFS by default). */
 export function createS3Storage(config: S3StorageConfig): S3Storage {
   const { bucket } = config;
+  const presignConfig = {
+    endpoint: config.directEndpoint || config.endpoint,
+    region: config.region,
+    bucket: config.bucket,
+    accessKeyId: config.accessKeyId,
+    secretAccessKey: config.secretAccessKey,
+  };
+  let appliedCorsOrigin: string | null = null;
   const client = new S3Client({
     endpoint: config.endpoint,
     region: config.region,
@@ -45,6 +62,27 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
     responseChecksumValidation: "WHEN_REQUIRED",
   });
 
+  async function ensureCors(origin: string) {
+    if (appliedCorsOrigin === origin) return;
+    await client.send(
+      new PutBucketCorsCommand({
+        Bucket: bucket,
+        CORSConfiguration: {
+          CORSRules: [
+            {
+              AllowedOrigins: [origin],
+              AllowedMethods: ["GET", "HEAD", "PUT"],
+              AllowedHeaders: ["*"],
+              ExposeHeaders: ["ETag", "Content-Length", "Content-Range"],
+              MaxAgeSeconds: 3600,
+            },
+          ],
+        },
+      }),
+    );
+    appliedCorsOrigin = origin;
+  }
+
   return {
     async ensureBucket() {
       try {
@@ -53,7 +91,10 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
         if (!isNotFound(err)) throw err;
         await client.send(new CreateBucketCommand({ Bucket: bucket }));
       }
+      if (config.corsOrigin) await ensureCors(config.corsOrigin);
     },
+
+    ensureCors,
 
     async createUpload(key, contentType) {
       const { UploadId } = await client.send(
@@ -90,6 +131,34 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
         });
       if (!ETag) throw new Error("Storage returned no part ETag");
       return { partNumber, etag: ETag };
+    },
+
+    async listParts(key, uploadId) {
+      const parts: StoredPart[] = [];
+      let partNumberMarker: string | undefined;
+      try {
+        for (;;) {
+          const page = await client.send(
+            new ListPartsCommand({
+              Bucket: bucket,
+              Key: key,
+              UploadId: uploadId,
+              PartNumberMarker: partNumberMarker,
+            }),
+          );
+          for (const part of page.Parts ?? []) {
+            if (part.PartNumber !== undefined && part.ETag !== undefined && part.Size !== undefined) {
+              parts.push({ partNumber: part.PartNumber, etag: part.ETag, size: part.Size });
+            }
+          }
+          if (!page.IsTruncated || !page.NextPartNumberMarker) break;
+          partNumberMarker = page.NextPartNumberMarker;
+        }
+      } catch (err) {
+        if (isNotFound(err)) return [];
+        throw err;
+      }
+      return parts.sort((a, b) => a.partNumber - b.partNumber);
     },
 
     async completeUpload(key, uploadId, parts) {
@@ -134,6 +203,10 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
       return Body as Readable;
     },
 
+    async getPresignedUrl(request) {
+      return presignS3Url(presignConfig, request, config.now?.());
+    },
+
     async head(key) {
       try {
         const { ContentLength, ETag } = await client.send(
@@ -155,3 +228,4 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
 function isNotFound(err: unknown): boolean {
   return err instanceof S3ServiceException && err.$metadata.httpStatusCode === 404;
 }
+

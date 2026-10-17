@@ -5,8 +5,95 @@ import {
   loadConfig,
   loadExpiryConfig,
   loadLimitsConfig,
+  loadTransferConfig,
   loadUploadConfig,
 } from "./config";
+
+describe("transfer config", () => {
+  it("defaults to proxy mode without requiring a direct endpoint", () => {
+    expect(loadTransferConfig({})).toEqual({ mode: "proxy", directEndpoint: null, appOrigin: null });
+    expect(loadTransferConfig({ TRANSFER_MODE: "proxy" })).toEqual({
+      mode: "proxy",
+      directEndpoint: null,
+      appOrigin: null,
+    });
+  });
+
+  it("reads the HTTPS direct endpoint and optional app origin for direct and auto modes", () => {
+    expect(
+      loadTransferConfig({
+        TRANSFER_MODE: "direct",
+        STORAGE_DIRECT_ENDPOINT: "https://storage.lan.example.com:9443/",
+        APP_ORIGIN: "https://share.example.com",
+      }),
+    ).toEqual({
+      mode: "direct",
+      directEndpoint: "https://storage.lan.example.com:9443",
+      appOrigin: "https://share.example.com",
+    });
+    expect(
+      loadTransferConfig({
+        TRANSFER_MODE: "auto",
+        STORAGE_DIRECT_ENDPOINT: "https://storage.lan.example.com/s3",
+      }),
+    ).toEqual({
+      mode: "auto",
+      directEndpoint: "https://storage.lan.example.com/s3",
+      appOrigin: null,
+    });
+  });
+
+  it.each(["direct", "auto"])("refuses to start in %s mode when STORAGE_DIRECT_ENDPOINT is missing", (mode) => {
+    expect(() => loadTransferConfig({ TRANSFER_MODE: mode })).toThrow(/^Missing STORAGE_DIRECT_ENDPOINT/);
+    expect(() => loadTransferConfig({ TRANSFER_MODE: mode, STORAGE_DIRECT_ENDPOINT: "  " })).toThrow(
+      /^Missing STORAGE_DIRECT_ENDPOINT/,
+    );
+  });
+
+  it.each([
+    "http://storage.lan.example.com",
+    "http://localhost:9000",
+    "ftp://storage.lan.example.com",
+    "storage.lan.example.com",
+    "https://user:pass@storage.lan.example.com",
+    "https://storage.lan.example.com?x=1",
+    "https://storage.lan.example.com#frag",
+  ])("rejects a non-HTTPS or malformed STORAGE_DIRECT_ENDPOINT=%s", (endpoint) => {
+    expect(() => loadTransferConfig({ TRANSFER_MODE: "direct", STORAGE_DIRECT_ENDPOINT: endpoint })).toThrow(
+      /^Invalid STORAGE_DIRECT_ENDPOINT/,
+    );
+    expect(() => loadTransferConfig({ TRANSFER_MODE: "auto", STORAGE_DIRECT_ENDPOINT: endpoint })).toThrow(
+      /^Invalid STORAGE_DIRECT_ENDPOINT/,
+    );
+  });
+
+  it.each(["lan", "s3", "DIRECT", "true"])("rejects TRANSFER_MODE=%s", (mode) => {
+    expect(() => loadTransferConfig({ TRANSFER_MODE: mode, STORAGE_DIRECT_ENDPOINT: "https://s3.lan" })).toThrow(
+      /^Invalid TRANSFER_MODE/,
+    );
+  });
+
+  it.each(["https://share.example.com/path", "ftp://share.example.com", "share.example.com", "*"])(
+    "rejects an invalid APP_ORIGIN=%s",
+    (origin) => {
+      expect(() => loadTransferConfig({ APP_ORIGIN: origin })).toThrow(/^Invalid APP_ORIGIN/);
+    },
+  );
+
+  it("stops the app at startup when direct mode has no HTTPS endpoint", () => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: "postgres://x",
+        S3_ENDPOINT: "http://x",
+        S3_BUCKET: "b",
+        S3_ACCESS_KEY_ID: "k",
+        S3_SECRET_ACCESS_KEY: "s",
+        TRANSFER_MODE: "direct",
+        STORAGE_DIRECT_ENDPOINT: "http://storage.lan.example.com",
+      }),
+    ).toThrow(/^Invalid STORAGE_DIRECT_ENDPOINT/);
+  });
+});
 
 describe("expiry config", () => {
   it("defaults to 1d,3d,7d,14d,30d with 7d preselected", () => {
@@ -260,3 +347,4 @@ describe("access config", () => {
     ).not.toThrow();
   });
 });
+

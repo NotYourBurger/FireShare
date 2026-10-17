@@ -26,8 +26,14 @@ async function start(): Promise<HttpHandlers> {
   const db = drizzle(new Pool({ connectionString: config.databaseUrl }), { schema });
   await migrate(db, { migrationsFolder: path.join(process.cwd(), "drizzle") });
 
-  const storage = createS3Storage(config.s3);
+  const storage = createS3Storage({
+    ...config.s3,
+    directEndpoint: config.transfer.directEndpoint ?? undefined,
+  });
   await retry(() => storage.ensureBucket(), "storage");
+  if (config.transfer.mode !== "proxy" && config.transfer.appOrigin !== null) {
+    await retry(() => storage.ensureCors(config.transfer.appOrigin!), "storage CORS");
+  }
 
   const { rateLimitUpload, rateLimitDownload, ...shareLimits } = config.limits;
   const shares = createShareService({ db: db as unknown as Database, storage, limits: shareLimits });
@@ -38,6 +44,8 @@ async function start(): Promise<HttpHandlers> {
     upload: config.upload,
     access: createUploadAccess(loadAccessConfig()),
     rateLimits: { upload: perMinute(rateLimitUpload), download: perMinute(rateLimitDownload) },
+    transfer: config.transfer,
+    ensureCors: (origin) => storage.ensureCors(origin),
   });
 }
 

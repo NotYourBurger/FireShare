@@ -1,7 +1,13 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
-import type { ExpiryConfig, UploadConfig } from "./config";
-import { ShareError, type Download, type NewShare, type ShareErrorCode, type ShareService } from "./shares";
+import type { ExpiryConfig, TransferConfig, UploadConfig } from "./config";
+import {
+  ShareError,
+  type ArchiveDownload,
+  type NewShare,
+  type ShareErrorCode,
+  type ShareService,
+} from "./shares";
 import type { RateLimiter } from "./rate-limit";
 import type { ByteRange } from "./storage/adapter";
 import type { UploadAccess, UploadAccessControl } from "./upload-access";
@@ -34,6 +40,12 @@ export interface RateLimits {
   download: RateLimiter | null;
 }
 
+const DEFAULT_TRANSFER: TransferConfig = {
+  mode: "proxy",
+  directEndpoint: null,
+  appOrigin: null,
+};
+
 /**
  * Framework-independent request handlers. The Next.js route files only
  * forward to these.
@@ -44,13 +56,27 @@ export function createHttpHandlers({
   upload,
   access,
   rateLimits = { upload: null, download: null },
+  transfer = DEFAULT_TRANSFER,
+  ensureCors,
 }: {
   shares: ShareService;
   expiry: ExpiryConfig;
   upload: UploadConfig;
   access: UploadAccessControl;
   rateLimits?: RateLimits;
+  transfer?: TransferConfig;
+  ensureCors?: (origin: string) => Promise<void>;
 }) {
+  let configuredCorsOrigin: string | null = null;
+
+  async function ensureDirectCors(req: Request) {
+    if (!ensureCors) return;
+    const origin = transfer.appOrigin ?? new URL(req.url).origin;
+    if (origin === configuredCorsOrigin) return;
+    await ensureCors(origin);
+    configuredCorsOrigin = origin;
+  }
+
   /** Counts the request against `limiter`; returns the seconds to wait if it's over, else 0. */
   function throttle(limiter: RateLimiter | null, req: Request): number {
     if (!limiter) return 0;
@@ -133,10 +159,26 @@ export function createHttpHandlers({
       if (typeof newShare === "string") return json(400, { error: newShare });
       let share;
       try {
+        if (transfer.mode === "direct") {
+          await ensureDirectCors(req);
+        }
         share = await shares.createShare({ ...newShare, clientIp: access.clientAddress(req.headers) });
       } catch (err) {
         if (err instanceof ShareError) return json(errorStatus[err.code], { error: err.message });
         throw err;
+      }
+      if (transfer.mode === "direct") {
+        const files = await Promise.all(
+          share.files.map(async (file) => {
+            const direct = await shares.getDirectUpload(file.id, upload.chunkSize);
+            return {
+              ...file,
+              uploadUrl: `/api/uploads/${file.id}`,
+              partUrls: direct?.partUrls ?? [],
+            };
+          }),
+        );
+        return json(201, { id: share.id, files });
       }
       return json(201, {
         id: share.id,
@@ -157,15 +199,26 @@ export function createHttpHandlers({
       });
     },
 
+    /** GET /api/uploads/:id — direct-mode resume query (offset + remaining presigned part URLs). */
+    async getUpload(req: Request, uploadId: string) {
+      const refused = refuseJson(req);
+      if (refused) return refused;
+      if (transfer.mode !== "direct") return json(405, { error: "Direct upload is not enabled" });
+      await ensureDirectCors(req);
+      const direct = await shares.getDirectUpload(uploadId, upload.chunkSize);
+      if (!direct) return json(404, { error: "No such upload" });
+      return json(200, direct);
+    },
+
     /** HEAD /api/uploads/:id — tus offset query. */
     async headUpload(req: Request, uploadId: string) {
       const rejected = checkTusVersion(req) ?? refuseTus(req);
       if (rejected) return rejected;
-      const upload = await shares.getUpload(uploadId);
-      if (!upload) return tus(404);
+      const progress = await shares.getUpload(uploadId, upload.chunkSize);
+      if (!progress) return tus(404);
       return tus(200, {
-        "Upload-Offset": String(upload.offset),
-        "Upload-Length": String(upload.size),
+        "Upload-Offset": String(progress.offset),
+        "Upload-Length": String(progress.size),
         "Cache-Control": "no-store",
       });
     },
@@ -177,6 +230,7 @@ export function createHttpHandlers({
     async patchUpload(req: Request, uploadId: string) {
       const rejected = checkTusVersion(req) ?? refuseTus(req);
       if (rejected) return rejected;
+      if (transfer.mode === "direct") return tus(405);
       if (req.headers.get("Content-Type") !== "application/offset+octet-stream") return tus(415);
       const offset = parseNonNegativeInt(req.headers.get("Upload-Offset"));
       const length = parseNonNegativeInt(req.headers.get("Content-Length"));
@@ -205,7 +259,7 @@ export function createHttpHandlers({
       const refused = refuseJson(req);
       if (refused) return refused;
       try {
-        const { token, managementToken, expiresAt } = await shares.finalize(shareId);
+        const { token, managementToken, expiresAt } = await shares.finalize(shareId, upload.chunkSize);
         return json(200, { path: `/d/${token}`, managementPath: `/m/${managementToken}`, expiresAt });
       } catch (err) {
         if (err instanceof ShareError) return json(errorStatus[err.code], { error: err.message });
@@ -237,7 +291,7 @@ export function createHttpHandlers({
 
     /**
      * GET /d/:token/files/:fileId — streams one shared file as an attachment,
-     * or the single byte range asked for, so interrupted downloads resume.
+     * or redirects to a short-lived presigned storage URL in direct mode.
      */
     async download(req: Request, token: string, fileId: string) {
       const refused = refuseDownload(req);
@@ -246,6 +300,16 @@ export function createHttpHandlers({
         const file = await shares.openDownload(token, fileId);
         if (file === "unavailable") return html(410, UNAVAILABLE_PAGE);
         if (!file) return html(404, NOT_FOUND_PAGE);
+        if (transfer.mode === "direct") {
+          const location = await file.presign(contentDisposition(file.name));
+          return new Response(null, {
+            status: 302,
+            headers: {
+              Location: location,
+              ...SAFE_HEADERS,
+            },
+          });
+        }
         return await serveFile(req, file);
       } catch (err) {
         if (err instanceof ShareError && err.code === "tampered") return html(errorStatus.tampered, TAMPERED_PAGE);
@@ -285,7 +349,18 @@ const ACCESS_ERROR = {
   network: "Uploads aren't allowed from your network.",
 } as const;
 
-async function serveFile(req: Request, file: Download) {
+async function serveFile(req: Request, file: ArchiveDownload) {
+  if (file.size === null || file.etag === null) {
+    const stream = Readable.toWeb(await file.read()) as ReadableStream;
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        "Content-Type": file.contentType,
+        "Content-Disposition": contentDisposition(file.name),
+        ...SAFE_HEADERS,
+      },
+    });
+  }
   const headers = {
     "Content-Type": file.contentType,
     "Content-Disposition": contentDisposition(file.name),
