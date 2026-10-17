@@ -1,7 +1,9 @@
-import { and, eq, isNull, lte, or } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, isNull, lte, or } from "drizzle-orm";
+import { crc32 } from "node:zlib";
 import type { CleanupConfig } from "./config";
 import { schema, type Database } from "./db";
-import type { StorageAdapter } from "./storage/adapter";
+import { partsCrc32 } from "./shares";
+import { ObjectChangedError, type StorageAdapter } from "./storage/adapter";
 
 const { shares, files } = schema;
 
@@ -14,7 +16,11 @@ export interface CleanupReport {
   /** Pending shares past `PENDING_TTL`, removed with their incomplete uploads. */
   abandonedShares: number;
   abandonedBytes: number;
-  /** Shares that hit an error; they're retried on the next run. */
+  /** Files of active shares whose CRC32 was computed this run, so their share's Download all became resumable. */
+  checksummedFiles: number;
+  /** Bytes read from storage to compute them. */
+  checksummedBytes: number;
+  /** Shares, or files for the CRC32 job, that hit an error; they're retried on the next run. */
   failures: number;
 }
 
@@ -126,19 +132,103 @@ export function createCleanup({
     }
   }
 
+  /**
+   * Computes the CRC32 of each file of an active share that has none yet:
+   * direct-mode files, whose bytes never passed through the server. Each
+   * object is read once, guarded by the ETag recorded at finalize, and its
+   * CRC32 stored as soon as it's done, so a run cut short only repeats the
+   * file it was reading. A share that expires or is deleted before its turn
+   * is skipped. Stops between files, and abandons the file being read, once
+   * `signal` is aborted.
+   */
+  async function computeCrc32s(report: CleanupReport, signal?: AbortSignal) {
+    const active = () => and(eq(shares.status, "ready"), gt(shares.expiresAt, now()));
+    const due = await db
+      .select({ file: files })
+      .from(files)
+      .innerJoin(shares, eq(files.shareId, shares.id))
+      .where(and(isNull(files.crc32), isNotNull(files.completedAt), isNull(files.removedAt), active()))
+      .orderBy(asc(shares.readyAt), asc(files.position));
+
+    for (const { file } of due) {
+      if (signal?.aborted) return;
+      try {
+        // Files from before the crc32 column only need their chunks' combined.
+        let crc = partsCrc32(file.size, file.parts);
+        if (crc === null) {
+          const [stillActive] = await db
+            .select({ id: shares.id })
+            .from(shares)
+            .where(and(eq(shares.id, file.shareId), active()));
+          if (!stillActive) continue;
+          crc = await readCrc32(file, signal);
+          if (crc === null) continue;
+          report.checksummedBytes += file.size;
+        }
+        const stored = await db
+          .update(files)
+          .set({ crc32: crc })
+          .where(and(eq(files.id, file.id), isNull(files.crc32)))
+          .returning({ id: files.id });
+        if (stored.length > 0) report.checksummedFiles++;
+      } catch (err) {
+        if (signal?.aborted) return;
+        report.failures++;
+        console.error(`Cleanup couldn't compute the CRC32 of file ${file.id} in share ${file.shareId}:`, err);
+      }
+    }
+  }
+
+  /**
+   * Streams the object and returns its CRC32, or null when it no longer
+   * matches the fingerprint recorded at finalize. Downloads refuse such an
+   * object anyway, so there's nothing to compute.
+   */
+  async function readCrc32(file: typeof files.$inferSelect, signal?: AbortSignal): Promise<number | null> {
+    const stored = await storage.head(file.storageKey);
+    if (!stored || stored.size !== file.size || (file.fingerprintEtag !== null && stored.etag !== file.fingerprintEtag)) {
+      return null;
+    }
+    if (file.size === 0) return 0;
+    try {
+      const stream = await storage.getReadStream(file.storageKey, { ifMatch: stored.etag });
+      const abort = () => stream.destroy(new Error("Cleanup worker stopping"));
+      signal?.addEventListener("abort", abort, { once: true });
+      try {
+        signal?.throwIfAborted();
+        let crc = 0;
+        let length = 0;
+        for await (const chunk of stream as AsyncIterable<Buffer>) {
+          crc = crc32(chunk, crc);
+          length += chunk.length;
+        }
+        if (length !== file.size) throw new Error(`Read ${length} bytes, expected ${file.size}`);
+        return crc;
+      } finally {
+        signal?.removeEventListener("abort", abort);
+      }
+    } catch (err) {
+      if (err instanceof ObjectChangedError) return null;
+      throw err;
+    }
+  }
+
   return {
-    /** Runs every job once. */
-    async run(): Promise<CleanupReport> {
+    /** Runs every job once; `signal` cuts the CRC32 job short. */
+    async run(signal?: AbortSignal): Promise<CleanupReport> {
       const report: CleanupReport = {
         expiredShares: 0,
         removedFiles: 0,
         removedBytes: 0,
         abandonedShares: 0,
         abandonedBytes: 0,
+        checksummedFiles: 0,
+        checksummedBytes: 0,
         failures: 0,
       };
       await removeExpired(report);
       await removeAbandoned(report);
+      await computeCrc32s(report, signal);
       return report;
     },
   };

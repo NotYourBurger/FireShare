@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadAccessConfig, loadExpiryConfig, loadUploadConfig } from "./config";
+import { createCleanup } from "./cleanup";
+import type { Database } from "./db";
 import { createTestDb } from "./db/test-db";
 import { createHttpHandlers, MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, parseRange, type HttpHandlers } from "./http";
 import { createShareService } from "./shares";
@@ -661,12 +663,14 @@ describe("Range header parsing", () => {
 describe("direct transfer mode", () => {
   let memStorage: ReturnType<typeof createMemoryStorage>;
   let directHttp: HttpHandlers;
+  let db: Database;
 
   beforeEach(async () => {
     clock = new Date("2026-01-01T00:00:00Z");
     memStorage = createMemoryStorage({ now: () => clock });
+    db = await createTestDb();
     const shares = createShareService({
-      db: await createTestDb(),
+      db,
       storage: memStorage,
       now: () => clock,
     });
@@ -758,15 +762,34 @@ describe("direct transfer mode", () => {
     expect(storageGet.headers.get("Content-Disposition")).toContain("clip.mov");
     expect(Buffer.from(await storageGet.arrayBuffer()).equals(Buffer.concat([part1, part2]))).toBe(true);
 
-    // Download all streams a store-only ZIP without Range or Content-Length.
+    // Until the cleanup worker has the CRC32s, Download all streams a store-only ZIP without Range or Content-Length.
     const zipRes = await directHttp.downloadAll(new Request(`${origin}${path}/all`), token);
     expect(zipRes.status).toBe(200);
-    expect(zipRes.headers.get("Accept-Ranges")).toBeNull();
+    expect(zipRes.headers.get("Accept-Ranges")).toBe("none");
     expect(zipRes.headers.get("Content-Length")).toBeNull();
-    const entries = await unzip(Buffer.from(await zipRes.arrayBuffer()));
+    expect(zipRes.headers.get("ETag")).toBeNull();
+    const streamed = Buffer.from(await zipRes.arrayBuffer());
+    const entries = await unzip(streamed);
     expect(entries.map((e) => [e.name, e.size])).toEqual([
       ["clip.mov", size],
       ["empty.txt", 0],
     ]);
+
+    // Once it has, Download all has an exact size and resumes like any download.
+    const config = { deleteGraceSeconds: 3600, pendingTtlSeconds: 86400 };
+    await createCleanup({ db, storage: memStorage, config, now: () => clock }).run();
+    const fullRes = await directHttp.downloadAll(new Request(`${origin}${path}/all`), token);
+    expect(fullRes.headers.get("Accept-Ranges")).toBe("bytes");
+    const full = Buffer.from(await fullRes.arrayBuffer());
+    expect(Number(fullRes.headers.get("Content-Length"))).toBe(full.length);
+    const rest = await directHttp.downloadAll(
+      new Request(`${origin}${path}/all`, {
+        headers: { Range: "bytes=1000-", "If-Range": fullRes.headers.get("ETag")! },
+      }),
+      token,
+    );
+    expect(rest.status).toBe(206);
+    expect(Buffer.from(await rest.arrayBuffer()).equals(full.subarray(1000))).toBe(true);
+    expect((await unzip(full)).map((e) => e.crc32)).toEqual(entries.map((e) => e.crc32));
   });
 });

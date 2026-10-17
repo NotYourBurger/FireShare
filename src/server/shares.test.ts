@@ -581,7 +581,7 @@ describe("share service", () => {
       const [row] = await db.select().from(schema.files).where(eq(schema.files.name, "b.txt"));
       await db
         .update(schema.files)
-        .set({ parts: row.parts.map(({ crc32: _, ...part }) => part) })
+        .set({ parts: row.parts.map(({ crc32: _, ...part }) => part), crc32: null })
         .where(eq(schema.files.id, row.id));
 
       expect(await service.viewShare(token)).toMatchObject({ downloadAll: true });
