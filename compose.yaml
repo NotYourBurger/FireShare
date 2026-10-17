@@ -1,0 +1,60 @@
+# FireShare: copy .env.example to .env, set the secrets, then `docker compose up`.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://fireshare:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/fireshare
+      S3_ENDPOINT: http://storage:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-fireshare}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      storage:
+        condition: service_started
+    networks: [public, internal]
+
+  db:
+    image: postgres:18.1-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fireshare
+      POSTGRES_DB: fireshare
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fireshare -d fireshare"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  # Object storage. Deliberately publishes no ports: the S3 API is reachable
+  # only from the app over the internal network, and the console is off.
+  storage:
+    image: rustfs/rustfs:1.0.1
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
+      RUSTFS_CONSOLE_ENABLE: "false"
+    volumes:
+      - storage-data:/data
+    networks: [internal]
+
+networks:
+  public: {}
+  # No route in or out: only containers attached to it can talk to each other.
+  internal:
+    internal: true
+
+volumes:
+  db-data: {}
+  storage-data: {}

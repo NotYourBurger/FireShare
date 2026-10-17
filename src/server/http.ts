@@ -1,0 +1,173 @@
+import { Readable } from "node:stream";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
+import { ShareError, type ShareErrorCode, type ShareService } from "./shares";
+
+const TUS_VERSION = "1.0.0";
+const MAX_NAME_LENGTH = 255;
+const MIME_TYPE = /^[\w.+-]+\/[\w.+-]+$/;
+
+const errorStatus: Record<ShareErrorCode, number> = {
+  not_found: 404,
+  offset_mismatch: 409,
+  invalid_chunk: 400,
+  not_finalizable: 409,
+};
+
+/**
+ * Framework-independent request handlers. The Next.js route files only
+ * forward to these.
+ */
+export function createHttpHandlers({ shares }: { shares: ShareService }) {
+  return {
+    /** POST /api/shares — authorizes and creates a `pending` share. */
+    async createShare(req: Request) {
+      const files = parseNewFiles(await req.json().catch(() => null));
+      if (!files) return json(400, { error: "Invalid files" });
+      const share = await shares.createShare(files);
+      return json(201, {
+        id: share.id,
+        files: share.files.map((file) => ({ ...file, uploadUrl: `/api/uploads/${file.id}` })),
+      });
+    },
+
+    /** OPTIONS /api/uploads/:id — tus capability discovery. */
+    async optionsUpload() {
+      return new Response(null, {
+        status: 204,
+        headers: { "Tus-Resumable": TUS_VERSION, "Tus-Version": TUS_VERSION },
+      });
+    },
+
+    /** HEAD /api/uploads/:id — tus offset query. */
+    async headUpload(req: Request, uploadId: string) {
+      const rejected = checkTusVersion(req);
+      if (rejected) return rejected;
+      const upload = await shares.getUpload(uploadId);
+      if (!upload) return tus(404);
+      return tus(200, {
+        "Upload-Offset": String(upload.offset),
+        "Upload-Length": String(upload.size),
+        "Cache-Control": "no-store",
+      });
+    },
+
+    /** PATCH /api/uploads/:id — tus chunk, streamed straight into storage. */
+    async patchUpload(req: Request, uploadId: string) {
+      const rejected = checkTusVersion(req);
+      if (rejected) return rejected;
+      if (req.headers.get("Content-Type") !== "application/offset+octet-stream") return tus(415);
+      const offset = parseNonNegativeInt(req.headers.get("Upload-Offset"));
+      const length = parseNonNegativeInt(req.headers.get("Content-Length"));
+      if (offset === null || length === null) return tus(400);
+
+      const body = req.body
+        ? Readable.fromWeb(req.body as NodeReadableStream<Uint8Array>)
+        : Readable.from([]);
+      try {
+        const newOffset = await shares.writeChunk(uploadId, offset, body, length);
+        return tus(204, { "Upload-Offset": String(newOffset) });
+      } catch (err) {
+        body.destroy();
+        if (err instanceof ShareError) return tus(errorStatus[err.code]);
+        throw err;
+      }
+    },
+
+    /** POST /api/shares/:id/finalize — makes the share `ready` and returns its link once. */
+    async finalize(_req: Request, shareId: string) {
+      try {
+        const { token } = await shares.finalize(shareId);
+        return json(200, { path: `/d/${token}` });
+      } catch (err) {
+        if (err instanceof ShareError) return json(errorStatus[err.code], { error: err.message });
+        throw err;
+      }
+    },
+
+    /** GET /d/:token — streams the shared file as an attachment. */
+    async download(_req: Request, token: string) {
+      const file = await shares.openDownload(token);
+      if (!file) {
+        return new Response(NOT_FOUND_PAGE, {
+          status: 404,
+          headers: { "Content-Type": "text/html; charset=utf-8", ...SAFE_HEADERS },
+        });
+      }
+      return new Response(Readable.toWeb(file.stream) as ReadableStream, {
+        status: 200,
+        headers: {
+          "Content-Type": file.contentType,
+          "Content-Length": String(file.size),
+          "Content-Disposition": contentDisposition(file.name),
+          ...SAFE_HEADERS,
+        },
+      });
+    },
+  };
+}
+
+export type HttpHandlers = ReturnType<typeof createHttpHandlers>;
+
+const SAFE_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "Cache-Control": "private, no-store",
+  // The token is in the URL; don't leak it to other sites.
+  "Referrer-Policy": "no-referrer",
+};
+
+const NOT_FOUND_PAGE = `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Link not available · FireShare</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#f6f5f2;color:#1d1b18}main{max-width:28rem;padding:1rem}@media(prefers-color-scheme:dark){body{background:#1a1917;color:#ecebe8}}</style></head>
+<body><main><h1>This link isn't available</h1><p>It may have been mistyped, expired or been deleted.</p></main></body>
+</html>`;
+
+function parseNewFiles(input: unknown) {
+  // One file per share until multi-file shares land.
+  if (!isRecord(input) || !Array.isArray(input.files) || input.files.length !== 1) return null;
+  const files = [];
+  for (const file of input.files as unknown[]) {
+    if (!isRecord(file)) return null;
+    const { name, size, type } = file;
+    if (typeof name !== "string" || name.length === 0 || name.length > MAX_NAME_LENGTH) return null;
+    if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) return null;
+    const contentType =
+      typeof type === "string" && MIME_TYPE.test(type) ? type : "application/octet-stream";
+    files.push({ name, size, contentType });
+  }
+  return files;
+}
+
+/** `attachment` with an ASCII fallback name plus the exact UTF-8 name (RFC 6266). */
+function contentDisposition(name: string): string {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, "_");
+  const encoded = encodeURIComponent(name).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+function checkTusVersion(req: Request): Response | null {
+  return req.headers.get("Tus-Resumable") === TUS_VERSION
+    ? null
+    : tus(412, { "Tus-Version": TUS_VERSION });
+}
+
+function tus(status: number, headers: Record<string, string> = {}) {
+  return new Response(null, { status, headers: { "Tus-Resumable": TUS_VERSION, ...headers } });
+}
+
+function json(status: number, body: unknown) {
+  return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
+}
+
+function parseNonNegativeInt(value: string | null): number | null {
+  if (value === null || !/^\d+$/.test(value)) return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
