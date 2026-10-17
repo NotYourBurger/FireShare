@@ -2,12 +2,18 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { schema, type Database } from "./db";
-import { MIN_PART_SIZE, type StorageAdapter } from "./storage/adapter";
+import { chunkHashesFingerprint, verifiedChunk } from "./integrity";
+import { MIN_PART_SIZE, type StorageAdapter, type UploadedPart } from "./storage/adapter";
 import { generateToken, hashToken } from "./tokens";
 
 const { shares, files } = schema;
 
-export type ShareErrorCode = "not_found" | "offset_mismatch" | "invalid_chunk" | "not_finalizable";
+export type ShareErrorCode =
+  | "not_found"
+  | "offset_mismatch"
+  | "invalid_chunk"
+  | "checksum_mismatch"
+  | "not_finalizable";
 
 export class ShareError extends Error {
   constructor(
@@ -114,9 +120,10 @@ export function createShareService({
 
     /**
      * Streams one chunk into the next storage part and returns the new offset.
-     * The offset only advances once storage has accepted the whole chunk.
+     * A chunk whose SHA-256 (hex) isn't `sha256` never becomes a part. The
+     * offset only advances once storage has accepted the whole chunk.
      */
-    async writeChunk(fileId: string, offset: number, body: Readable, length: number) {
+    async writeChunk(fileId: string, offset: number, body: Readable, length: number, sha256: string) {
       const file = await findPendingFile(fileId);
       if (!file) throw new ShareError("not_found", "No such upload");
       if (offset !== file.uploadOffset) {
@@ -129,16 +136,17 @@ export function createShareService({
       if (newOffset < file.size && length < MIN_PART_SIZE) {
         throw new ShareError("invalid_chunk", `Chunks before the last must be at least ${MIN_PART_SIZE} bytes`);
       }
-      const part = await storage.writePart(
-        file.storageKey,
-        file.multipartUploadId,
-        file.parts.length + 1,
-        body,
-        length,
-      );
+      if (length === 0) return offset;
+      const chunk = verifiedChunk(body, sha256);
+      const part = await storage
+        .writePart(file.storageKey, file.multipartUploadId, file.parts.length + 1, chunk.stream, length)
+        .catch((err: unknown) => {
+          if (chunk.mismatched()) throw new ShareError("checksum_mismatch", "Chunk doesn't match its SHA-256");
+          throw err;
+        });
       const updated = await db
         .update(files)
-        .set({ uploadOffset: newOffset, parts: [...file.parts, part] })
+        .set({ uploadOffset: newOffset, parts: [...file.parts, { ...part, size: length, ...chunk.digest() }] })
         .where(and(eq(files.id, fileId), eq(files.uploadOffset, offset)))
         .returning({ id: files.id });
       if (updated.length === 0) {
@@ -148,7 +156,8 @@ export function createShareService({
     },
 
     /**
-     * Completes every file and marks the share `ready`, starting its expiry;
+     * Completes every file, checks its stored size and records its
+     * fingerprint, then marks the share `ready`, starting its expiry;
      * returns the share token once. If any file can't be completed the share stays `pending`, and a
      * later call picks up where this one stopped.
      */
@@ -169,15 +178,23 @@ export function createShareService({
       }
       for (const file of shareFiles) {
         if (file.completedAt) continue;
-        let parts = file.parts;
+        let parts: UploadedPart[] = file.parts;
         if (file.size === 0) {
           // A multipart upload needs at least one part, even an empty one.
           parts = [await storage.writePart(file.storageKey, file.multipartUploadId, 1, Readable.from([]), 0)];
         }
         await storage.completeUpload(file.storageKey, file.multipartUploadId, parts);
+        const stored = await storage.head(file.storageKey);
+        if (stored?.size !== file.size) {
+          throw new Error(`Stored object for file ${file.id} is ${stored?.size ?? "missing"}, not ${file.size} bytes`);
+        }
         await db
           .update(files)
-          .set({ completedAt: now() })
+          .set({
+            completedAt: now(),
+            fingerprintHash: chunkHashesFingerprint(file.parts.map((part) => part.sha256)),
+            fingerprintEtag: stored.etag,
+          })
           .where(and(eq(files.id, file.id), isNull(files.completedAt)));
       }
 

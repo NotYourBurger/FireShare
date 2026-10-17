@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { buffer } from "node:stream/consumers";
+import { crc32 } from "node:zlib";
 import { beforeEach, describe, expect, it } from "vitest";
 import { schema, type Database } from "./db";
 import { createTestDb } from "./db/test-db";
+import { chunkHashesFingerprint, combineCrc32 } from "./integrity";
 import { createShareService, ShareError, type Download, type NewFile, type NewShare, type ShareService } from "./shares";
 import { MIN_PART_SIZE } from "./storage/adapter";
 import type { StorageAdapter } from "./storage/adapter";
@@ -30,6 +33,12 @@ const advance = (seconds: number) => {
 
 const body = (data: Buffer | string) => Readable.from([Buffer.from(data)]);
 
+const sha256 = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
+
+/** Writes `data` as one chunk with its correct SHA-256; `length` defaults to its real length. */
+const write = (fileId: string, offset: number, data: Buffer | string, length = Buffer.byteLength(data)) =>
+  service.writeChunk(fileId, offset, body(data), length, sha256(data));
+
 const withFiles = (files: NewFile[], expirySeconds = 7 * DAY): NewShare => ({
   title: null,
   message: null,
@@ -42,7 +51,7 @@ const file = (name: string, size: number): NewFile => ({ name, size, contentType
 /** Uploads each file's whole content in one chunk. */
 async function uploadAll(share: { files: { id: string }[] }, contents: string[]) {
   for (const [i, content] of contents.entries()) {
-    await service.writeChunk(share.files[i].id, 0, body(content), Buffer.byteLength(content));
+    await write(share.files[i].id, 0, content);
   }
 }
 
@@ -53,7 +62,7 @@ describe("share service", () => {
     ]));
     const [file] = share.files;
 
-    expect(await service.writeChunk(file.id, 0, body("hello world"), 11)).toBe(11);
+    expect(await write(file.id, 0, "hello world")).toBe(11);
     const { token } = await service.finalize(share.id);
 
     const download = await service.openDownload(token, file.id);
@@ -83,7 +92,7 @@ describe("share service", () => {
     const createUpload = storage.createUpload;
     storage.createUpload = (key, type) => (keys.push(key), createUpload(key, type));
     const share = await service.createShare(withFiles([{ name: "a.txt", size: 1, contentType: "text/plain" }]));
-    await service.writeChunk(share.files[0].id, 0, body("a"), 1);
+    await write(share.files[0].id, 0, "a");
     const { token } = await service.finalize(share.id);
 
     await storage.delete(keys[0]);
@@ -92,7 +101,7 @@ describe("share service", () => {
 
   it("stores only a hash of the share token", async () => {
     const share = await service.createShare(withFiles([{ name: "a.txt", size: 1, contentType: "text/plain" }]));
-    await service.writeChunk(share.files[0].id, 0, body("a"), 1);
+    await write(share.files[0].id, 0, "a");
     const { token } = await service.finalize(share.id);
 
     const rows = await db.select().from(schema.shares);
@@ -112,10 +121,10 @@ describe("share service", () => {
       const { shareId, fileId } = await pendingFile(big.length);
       expect(await service.getUpload(fileId)).toEqual({ size: big.length, offset: 0 });
 
-      await service.writeChunk(fileId, 0, body(big.subarray(0, MIN_PART_SIZE)), MIN_PART_SIZE);
+      await write(fileId, 0, big.subarray(0, MIN_PART_SIZE));
       expect(await service.getUpload(fileId)).toEqual({ size: big.length, offset: MIN_PART_SIZE });
 
-      await service.writeChunk(fileId, MIN_PART_SIZE, body(big.subarray(MIN_PART_SIZE)), 3);
+      await write(fileId, MIN_PART_SIZE, big.subarray(MIN_PART_SIZE));
       const { token } = await service.finalize(shareId);
       const download = await service.openDownload(token, fileId);
       expect((await buffer((download as Download).stream)).equals(big)).toBe(true);
@@ -123,21 +132,21 @@ describe("share service", () => {
 
     it("rejects a chunk that doesn't start at the current offset", async () => {
       const { fileId } = await pendingFile(big.length);
-      await expect(service.writeChunk(fileId, 5, body("xyz"), 3)).rejects.toThrow(
+      await expect(write(fileId, 5, "xyz")).rejects.toThrow(
         expect.objectContaining({ code: "offset_mismatch" }),
       );
     });
 
     it("rejects a chunk that would run past the declared size", async () => {
       const { fileId } = await pendingFile(2);
-      await expect(service.writeChunk(fileId, 0, body("xyz"), 3)).rejects.toThrow(
+      await expect(write(fileId, 0, "xyz")).rejects.toThrow(
         expect.objectContaining({ code: "invalid_chunk" }),
       );
     });
 
     it("rejects a non-final chunk smaller than the storage minimum part size", async () => {
       const { fileId } = await pendingFile(big.length);
-      await expect(service.writeChunk(fileId, 0, body("xyz"), 3)).rejects.toThrow(
+      await expect(write(fileId, 0, "xyz")).rejects.toThrow(
         expect.objectContaining({ code: "invalid_chunk" }),
       );
       expect(await service.getUpload(fileId)).toEqual({ size: big.length, offset: 0 });
@@ -145,13 +154,77 @@ describe("share service", () => {
 
     it("keeps the offset unchanged when a chunk's body is cut short", async () => {
       const { fileId } = await pendingFile(3);
-      await expect(service.writeChunk(fileId, 0, body("x"), 3)).rejects.toThrow();
+      await expect(write(fileId, 0, "x", 3)).rejects.toThrow();
       expect(await service.getUpload(fileId)).toEqual({ size: 3, offset: 0 });
     });
 
     it("reports unknown uploads as not found", async () => {
       expect(await service.getUpload(crypto.randomUUID())).toBeNull();
-      await expect(service.writeChunk(crypto.randomUUID(), 0, body("x"), 1)).rejects.toBeInstanceOf(ShareError);
+      await expect(write(crypto.randomUUID(), 0, "x")).rejects.toBeInstanceOf(ShareError);
+    });
+  });
+
+  describe("chunk verification", () => {
+    const first = Buffer.alloc(MIN_PART_SIZE, 1);
+    const second = Buffer.from("the rest");
+
+    async function pendingFile() {
+      const share = await service.createShare(withFiles([file("big.bin", first.length + second.length)]));
+      return { shareId: share.id, fileId: share.files[0].id };
+    }
+
+    /** Records whether storage accepted each part it was asked to write. */
+    function watchParts() {
+      const accepted: boolean[] = [];
+      const writePart = storage.writePart;
+      storage.writePart = (...args) =>
+        writePart(...args).then(
+          (part) => (accepted.push(true), part),
+          (err: unknown) => {
+            accepted.push(false);
+            throw err;
+          },
+        );
+      return accepted;
+    }
+
+    it("rejects a chunk that doesn't match its SHA-256 without storing it", async () => {
+      const { fileId } = await pendingFile();
+      const accepted = watchParts();
+      const corrupted = Buffer.from(first);
+      corrupted[12345] ^= 0xff;
+
+      await expect(
+        service.writeChunk(fileId, 0, body(corrupted), corrupted.length, sha256(first)),
+      ).rejects.toThrow(expect.objectContaining({ code: "checksum_mismatch" }));
+      expect(accepted).toEqual([false]);
+      expect(await service.getUpload(fileId)).toEqual({ size: first.length + second.length, offset: 0 });
+    });
+
+    it("accepts the chunk when it's sent again intact", async () => {
+      const { shareId, fileId } = await pendingFile();
+      const corrupted = Buffer.from(first);
+      corrupted[0] ^= 0xff;
+      await expect(service.writeChunk(fileId, 0, body(corrupted), corrupted.length, sha256(first))).rejects.toThrow();
+
+      await write(fileId, 0, first);
+      await write(fileId, first.length, second);
+      const { token } = await service.finalize(shareId);
+      const download = await service.openDownload(token, fileId);
+      expect((await buffer((download as Download).stream)).equals(Buffer.concat([first, second]))).toBe(true);
+    });
+
+    it("stores each chunk's SHA-256 and CRC32, which combine into the file's CRC32", async () => {
+      const { fileId } = await pendingFile();
+      await write(fileId, 0, first);
+      await write(fileId, first.length, second);
+
+      const [row] = await db.select().from(schema.files);
+      expect(row.parts).toEqual([
+        expect.objectContaining({ partNumber: 1, size: first.length, sha256: sha256(first), crc32: crc32(first) }),
+        expect.objectContaining({ partNumber: 2, size: second.length, sha256: sha256(second), crc32: crc32(second) }),
+      ]);
+      expect(combineCrc32(row.parts)).toBe(crc32(Buffer.concat([first, second])));
     });
   });
 
@@ -166,7 +239,7 @@ describe("share service", () => {
 
     it("issues the share token only once", async () => {
       const share = await service.createShare(withFiles([{ name: "a.txt", size: 1, contentType: "text/plain" }]));
-      await service.writeChunk(share.files[0].id, 0, body("a"), 1);
+      await write(share.files[0].id, 0, "a");
       await service.finalize(share.id);
 
       await expect(service.finalize(share.id)).rejects.toThrow(
@@ -176,7 +249,7 @@ describe("share service", () => {
 
     it("accepts no more chunks once the share is ready", async () => {
       const share = await service.createShare(withFiles([{ name: "a.txt", size: 1, contentType: "text/plain" }]));
-      await service.writeChunk(share.files[0].id, 0, body("a"), 1);
+      await write(share.files[0].id, 0, "a");
       await service.finalize(share.id);
 
       expect(await service.getUpload(share.files[0].id)).toBeNull();
@@ -189,6 +262,45 @@ describe("share service", () => {
       await expect(service.finalize("not-a-uuid")).rejects.toThrow(
         expect.objectContaining({ code: "not_found" }),
       );
+    });
+
+    it("records each file's fingerprint: the hash of its chunk hashes and the storage ETag", async () => {
+      const keys: string[] = [];
+      const createUpload = storage.createUpload;
+      storage.createUpload = (key, type) => (keys.push(key), createUpload(key, type));
+      const chunks = [Buffer.alloc(MIN_PART_SIZE, 1), Buffer.from("tail")];
+      const share = await service.createShare(
+        withFiles([file("a.bin", MIN_PART_SIZE + 4), file("b.txt", 1), file("empty.txt", 0)]),
+      );
+      await write(share.files[0].id, 0, chunks[0]);
+      await write(share.files[0].id, MIN_PART_SIZE, chunks[1]);
+      await write(share.files[1].id, 0, "b");
+      await service.finalize(share.id);
+
+      const rows = await db.query.files.findMany({ orderBy: (files, { asc }) => asc(files.position) });
+      const expectedHashes = [
+        chunkHashesFingerprint(chunks.map(sha256)),
+        chunkHashesFingerprint([sha256("b")]),
+        chunkHashesFingerprint([]),
+      ];
+      for (const [i, row] of rows.entries()) {
+        expect(row.fingerprintHash).toBe(expectedHashes[i]);
+        expect(row.fingerprintEtag).toBe((await storage.head(keys[i]))!.etag);
+      }
+    });
+
+    it("refuses a file whose stored size doesn't match, leaving the share pending", async () => {
+      const share = await service.createShare(withFiles([file("a.txt", 1)]));
+      await write(share.files[0].id, 0, "a");
+      const head = storage.head;
+      storage.head = async (key) => {
+        const info = await head(key);
+        return info && { ...info, size: info.size + 1 };
+      };
+
+      await expect(service.finalize(share.id)).rejects.toThrow(/not 1 bytes/);
+      const [row] = await db.select().from(schema.shares);
+      expect(row).toMatchObject({ status: "pending", tokenHash: null });
     });
 
     it("shares an empty file", async () => {
@@ -279,7 +391,7 @@ describe("share service", () => {
 
       for (const { id } of share.files) {
         expect(await service.getUpload(id)).toBeNull();
-        await expect(service.writeChunk(id, 1, body(""), 0)).rejects.toThrow(
+        await expect(write(id, 1, "")).rejects.toThrow(
           expect.objectContaining({ code: "not_found" }),
         );
       }

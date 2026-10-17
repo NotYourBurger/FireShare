@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig, loadExpiryConfig } from "./config";
+import { loadConfig, loadExpiryConfig, loadUploadConfig } from "./config";
 
 describe("expiry config", () => {
   it("defaults to 1d,3d,7d,14d,30d with 7d preselected", () => {
@@ -60,5 +60,28 @@ describe("expiry config", () => {
         EXPIRY_DEFAULT: "2d",
       }),
     ).toThrow(/^Invalid EXPIRY_DEFAULT/);
+  });
+});
+
+describe("upload config", () => {
+  it("defaults to 64 MB chunks and 3 files at a time", () => {
+    expect(loadUploadConfig({})).toEqual({ chunkSize: 64 * 1024 * 1024, parallelFiles: 3 });
+  });
+
+  it("reads the chunk size in KB, MB or GB and the parallel file count", () => {
+    expect(loadUploadConfig({ UPLOAD_CHUNK_SIZE: "8MB", UPLOAD_PARALLEL_FILES: "5" })).toEqual({
+      chunkSize: 8 * 1024 * 1024,
+      parallelFiles: 5,
+    });
+    expect(loadUploadConfig({ UPLOAD_CHUNK_SIZE: "1GB" }).chunkSize).toBe(1024 ** 3);
+    expect(loadUploadConfig({ UPLOAD_CHUNK_SIZE: "5120KB" }).chunkSize).toBe(5 * 1024 * 1024);
+  });
+
+  it.each(["4MB", "6GB", "64", "64mb", "64 MB", "1.5GB", "0MB", "-64MB"])("rejects UPLOAD_CHUNK_SIZE=%s", (value) => {
+    expect(() => loadUploadConfig({ UPLOAD_CHUNK_SIZE: value })).toThrow(/^Invalid UPLOAD_CHUNK_SIZE/);
+  });
+
+  it.each(["0", "11", "2.5", "-1", "three"])("rejects UPLOAD_PARALLEL_FILES=%s", (value) => {
+    expect(() => loadUploadConfig({ UPLOAD_PARALLEL_FILES: value })).toThrow(/^Invalid UPLOAD_PARALLEL_FILES/);
   });
 });

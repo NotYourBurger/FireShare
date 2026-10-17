@@ -162,3 +162,21 @@ progress {
   flex: 1;
   min-width: 0;
 }
+
+.file-info progress {
+  margin: 0.25rem 0 0;
+}
+
+.files li[data-status="failed"] .muted {
+  color: var(--danger);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.card p {
+  margin: 0;
+}

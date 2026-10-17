@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { loadExpiryConfig } from "./config";
+import { loadExpiryConfig, loadUploadConfig } from "./config";
 import { createTestDb } from "./db/test-db";
 import { createHttpHandlers, MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, type HttpHandlers } from "./http";
 import { createShareService } from "./shares";
 import { createMemoryStorage } from "./storage/memory";
+import { MIN_PART_SIZE } from "./storage/adapter";
 import { generateToken } from "./tokens";
 
 let http: HttpHandlers;
@@ -19,6 +21,7 @@ beforeEach(async () => {
   http = createHttpHandlers({
     shares,
     expiry: loadExpiryConfig({ EXPIRY_OPTIONS: "12h,1d,7d", EXPIRY_DEFAULT: "1d" }),
+    upload: loadUploadConfig({ UPLOAD_CHUNK_SIZE: "8MB", UPLOAD_PARALLEL_FILES: "2" }),
   });
 });
 
@@ -39,19 +42,40 @@ function createShare(files: unknown, fields: Record<string, unknown> = {}) {
   );
 }
 
-function patch(uploadId: string, offset: number, data: string, headers: Record<string, string> = {}) {
+/** The tus `Upload-Checksum` header value for `data`. */
+const checksum = (data: string | Buffer) => `sha256 ${createHash("sha256").update(data).digest("base64")}`;
+
+/**
+ * Sends `data` as one tus chunk, with its correct checksum unless `headers`
+ * says otherwise; a header set to undefined is left out.
+ */
+function patch(
+  uploadId: string,
+  offset: number,
+  data: string | Buffer,
+  headers: Record<string, string | undefined> = {},
+) {
+  const merged = {
+    "Tus-Resumable": "1.0.0",
+    "Content-Type": "application/offset+octet-stream",
+    "Upload-Offset": String(offset),
+    "Content-Length": String(Buffer.byteLength(data)),
+    "Upload-Checksum": checksum(data),
+    ...headers,
+  };
   return http.patchUpload(
     new Request(`${origin}/api/uploads/${uploadId}`, {
       method: "PATCH",
-      headers: {
-        "Tus-Resumable": "1.0.0",
-        "Content-Type": "application/offset+octet-stream",
-        "Upload-Offset": String(offset),
-        "Content-Length": String(Buffer.byteLength(data)),
-        ...headers,
-      },
-      body: data,
+      headers: Object.entries(merged).filter((entry): entry is [string, string] => entry[1] !== undefined),
+      body: typeof data === "string" ? data : new Uint8Array(data),
     }),
+    uploadId,
+  );
+}
+
+function head(uploadId: string) {
+  return http.headUpload(
+    new Request(`${origin}/api/uploads/${uploadId}`, { method: "HEAD", headers: { "Tus-Resumable": "1.0.0" } }),
     uploadId,
   );
 }
@@ -135,10 +159,47 @@ describe("HTTP API", () => {
       return files[0].id as string;
     }
 
-    it("advertises tus 1.0.0 on OPTIONS", async () => {
+    it("advertises tus 1.0.0 with SHA-256 checksums on OPTIONS", async () => {
       const res = await http.optionsUpload();
       expect(res.status).toBe(204);
       expect(res.headers.get("Tus-Version")).toBe("1.0.0");
+      expect(res.headers.get("Tus-Extension")).toBe("checksum");
+      expect(res.headers.get("Tus-Checksum-Algorithm")).toBe("sha256");
+    });
+
+    it("rejects a chunk whose SHA-256 doesn't match with 460, keeping the offset", async () => {
+      const id = await pendingUpload();
+      const res = await patch(id, 0, "abcd", { "Upload-Checksum": checksum("abce") });
+      expect(res.status).toBe(460);
+      expect((await head(id)).headers.get("Upload-Offset")).toBe("0");
+    });
+
+    it.each([
+      ["no checksum", undefined],
+      ["an unsupported algorithm", `md5 ${createHash("md5").update("abcd").digest("base64")}`],
+      ["a hex digest", `sha256 ${createHash("sha256").update("abcd").digest("hex")}`],
+      ["a truncated digest", checksum("abcd").slice(0, -4)],
+    ])("rejects a chunk with %s with 400", async (_case, value) => {
+      const id = await pendingUpload();
+      expect((await patch(id, 0, "abcd", { "Upload-Checksum": value })).status).toBe(400);
+      expect((await head(id)).headers.get("Upload-Offset")).toBe("0");
+    });
+
+    it("completes a file after a corrupted chunk is sent again intact", async () => {
+      const first = Buffer.alloc(MIN_PART_SIZE, 1);
+      const second = Buffer.from("tail");
+      const { id, files } = await (await createShare([{ name: "a.bin", size: first.length + second.length }])).json();
+      const fileId = files[0].id;
+
+      const corrupted = Buffer.from(first);
+      corrupted[1000] ^= 0xff;
+      expect((await patch(fileId, 0, corrupted, { "Upload-Checksum": checksum(first) })).status).toBe(460);
+      expect((await patch(fileId, 0, first)).status).toBe(204);
+      expect((await patch(fileId, first.length, second)).status).toBe(204);
+
+      const { path } = await (await finalize(id)).json();
+      const res = await download(`${path}/files/${fileId}`);
+      expect(Buffer.from(await res.arrayBuffer()).equals(Buffer.concat([first, second]))).toBe(true);
     });
 
     it("rejects requests without a supported Tus-Resumable header", async () => {
@@ -269,9 +330,13 @@ describe("HTTP API", () => {
     expect((await patch(files[0].id, 1, "")).status).toBe(404);
   });
 
+  it("gives the upload form the configured chunk size and parallel file count", () => {
+    expect(http.uploadOptions()).toMatchObject({ chunkSize: 8 * 1024 * 1024, parallelFiles: 2 });
+  });
+
   describe("expiry", () => {
     it("offers the configured presets with the default preselected", () => {
-      expect(http.uploadOptions()).toEqual({ expiryOptions: ["12h", "1d", "7d"], expiryDefault: "1d" });
+      expect(http.uploadOptions()).toMatchObject({ expiryOptions: ["12h", "1d", "7d"], expiryDefault: "1d" });
     });
 
     it.each([["2d"], ["24h"], [7], [""], [null]])("rejects the expiry %j with a reason", async (expiry) => {

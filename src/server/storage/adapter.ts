@@ -37,3 +37,6 @@ export interface StorageAdapter {
 
 /** S3's minimum size for every multipart part except the last. */
 export const MIN_PART_SIZE = 5 * 1024 * 1024;
+
+/** S3's maximum size for any multipart part. */
+export const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
