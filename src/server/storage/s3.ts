@@ -11,7 +11,7 @@ import {
   UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import type { Readable } from "node:stream";
-import type { StorageAdapter } from "./adapter";
+import { ObjectChangedError, type StorageAdapter } from "./adapter";
 import { exactLength } from "./exact-length";
 
 export interface S3StorageConfig {
@@ -104,8 +104,22 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
       );
     },
 
-    async getReadStream(key) {
-      const { Body } = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    async getReadStream(key, { range, ifMatch } = {}) {
+      const { Body } = await client
+        .send(
+          new GetObjectCommand({
+            Bucket: bucket,
+            Key: key,
+            Range: range && `bytes=${range.start}-${range.end}`,
+            IfMatch: ifMatch,
+          }),
+        )
+        .catch((err: unknown) => {
+          if (err instanceof S3ServiceException && err.$metadata.httpStatusCode === 412) {
+            throw new ObjectChangedError(key);
+          }
+          throw err;
+        });
       if (!Body) throw new Error("Storage returned no body");
       return Body as Readable;
     },

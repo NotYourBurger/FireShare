@@ -1,7 +1,8 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import type { ExpiryConfig, UploadConfig } from "./config";
-import { ShareError, type NewShare, type ShareErrorCode, type ShareService } from "./shares";
+import { ShareError, type Download, type NewShare, type ShareErrorCode, type ShareService } from "./shares";
+import type { ByteRange } from "./storage/adapter";
 
 const TUS_VERSION = "1.0.0";
 const MAX_NAME_LENGTH = 255;
@@ -18,6 +19,8 @@ const errorStatus: Record<ShareErrorCode, number> = {
   // tus checksum extension: "460 Checksum Mismatch".
   checksum_mismatch: 460,
   not_finalizable: 409,
+  // The stored object conflicts with the fingerprint recorded at finalize.
+  tampered: 409,
 };
 
 /**
@@ -124,25 +127,74 @@ export function createHttpHandlers({
       return shares.viewShare(token);
     },
 
-    /** GET /d/:token/files/:fileId — streams one shared file as an attachment. */
-    async download(_req: Request, token: string, fileId: string) {
-      const file = await shares.openDownload(token, fileId);
-      if (file === "expired") return html(410, EXPIRED_PAGE);
-      if (!file) return html(404, NOT_FOUND_PAGE);
-      return new Response(Readable.toWeb(file.stream) as ReadableStream, {
-        status: 200,
-        headers: {
-          "Content-Type": file.contentType,
-          "Content-Length": String(file.size),
-          "Content-Disposition": contentDisposition(file.name),
-          ...SAFE_HEADERS,
-        },
-      });
+    /**
+     * GET /d/:token/files/:fileId — streams one shared file as an attachment,
+     * or the single byte range asked for, so interrupted downloads resume.
+     */
+    async download(req: Request, token: string, fileId: string) {
+      try {
+        const file = await shares.openDownload(token, fileId);
+        if (file === "expired") return html(410, EXPIRED_PAGE);
+        if (!file) return html(404, NOT_FOUND_PAGE);
+        return await serveFile(req, file);
+      } catch (err) {
+        if (err instanceof ShareError && err.code === "tampered") return html(errorStatus.tampered, TAMPERED_PAGE);
+        throw err;
+      }
     },
   };
 }
 
 export type HttpHandlers = ReturnType<typeof createHttpHandlers>;
+
+async function serveFile(req: Request, file: Download) {
+  const headers = {
+    "Content-Type": file.contentType,
+    "Content-Disposition": contentDisposition(file.name),
+    "Accept-Ranges": "bytes",
+    ETag: file.etag,
+    ...SAFE_HEADERS,
+  };
+  // A resume that names an older version of the file gets the whole file instead.
+  const ifRange = req.headers.get("If-Range");
+  const range = ifRange === null || ifRange === file.etag ? parseRange(req.headers.get("Range"), file.size) : null;
+  if (range === "unsatisfiable") {
+    return new Response(null, { status: 416, headers: { ...headers, "Content-Range": `bytes */${file.size}` } });
+  }
+  const stream = Readable.toWeb(await file.read(range ?? undefined)) as ReadableStream;
+  if (!range) {
+    return new Response(stream, { status: 200, headers: { ...headers, "Content-Length": String(file.size) } });
+  }
+  return new Response(stream, {
+    status: 206,
+    headers: {
+      ...headers,
+      "Content-Length": String(range.end - range.start + 1),
+      "Content-Range": `bytes ${range.start}-${range.end}/${file.size}`,
+    },
+  });
+}
+
+/**
+ * The byte range a `Range` header asks for (RFC 9110), clamped to the file,
+ * or null to send the whole file. Multiple ranges and malformed headers are
+ * ignored, as the RFC allows.
+ */
+export function parseRange(header: string | null, size: number): ByteRange | "unsatisfiable" | null {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header?.trim() ?? "");
+  if (!match || (match[1] === "" && match[2] === "")) return null;
+  const first = match[1] === "" ? null : parseNonNegativeInt(match[1]);
+  const last = match[2] === "" ? null : parseNonNegativeInt(match[2]);
+  if (first === null) {
+    // Suffix range: the last `last` bytes.
+    if (last === null) return null;
+    if (last === 0 || size === 0) return "unsatisfiable";
+    return { start: Math.max(0, size - last), end: size - 1 };
+  }
+  if (last !== null && last < first) return null;
+  if (first >= size) return "unsatisfiable";
+  return { start: first, end: last === null ? size - 1 : Math.min(last, size - 1) };
+}
 
 const SAFE_HEADERS = {
   "X-Content-Type-Options": "nosniff",
@@ -162,6 +214,12 @@ const NOT_FOUND_PAGE = page(
   "Link not available",
   "This link isn't available",
   "It may have been mistyped, expired or been deleted.",
+);
+
+const TAMPERED_PAGE = page(
+  "File unavailable",
+  "This file can't be downloaded",
+  "The stored copy has changed since it was shared, so FireShare won't serve it. Ask the sender to share it again.",
 );
 
 const EXPIRED_PAGE = page(

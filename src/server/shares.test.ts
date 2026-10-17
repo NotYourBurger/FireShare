@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { buffer } from "node:stream/consumers";
 import { crc32 } from "node:zlib";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { schema, type Database } from "./db";
 import { createTestDb } from "./db/test-db";
 import { chunkHashesFingerprint, combineCrc32 } from "./integrity";
@@ -67,7 +67,7 @@ describe("share service", () => {
 
     const download = await service.openDownload(token, file.id);
     expect(download).toMatchObject({ name: "render.exr", size: 11, contentType: "image/x-exr" });
-    expect((await buffer((download as Download).stream)).toString()).toBe("hello world");
+    expect((await buffer(await (download as Download).read())).toString()).toBe("hello world");
   });
 
   it("returns nothing for an unknown token", async () => {
@@ -127,7 +127,7 @@ describe("share service", () => {
       await write(fileId, MIN_PART_SIZE, big.subarray(MIN_PART_SIZE));
       const { token } = await service.finalize(shareId);
       const download = await service.openDownload(token, fileId);
-      expect((await buffer((download as Download).stream)).equals(big)).toBe(true);
+      expect((await buffer(await (download as Download).read())).equals(big)).toBe(true);
     });
 
     it("rejects a chunk that doesn't start at the current offset", async () => {
@@ -211,7 +211,7 @@ describe("share service", () => {
       await write(fileId, first.length, second);
       const { token } = await service.finalize(shareId);
       const download = await service.openDownload(token, fileId);
-      expect((await buffer((download as Download).stream)).equals(Buffer.concat([first, second]))).toBe(true);
+      expect((await buffer(await (download as Download).read())).equals(Buffer.concat([first, second]))).toBe(true);
     });
 
     it("stores each chunk's SHA-256 and CRC32, which combine into the file's CRC32", async () => {
@@ -309,7 +309,79 @@ describe("share service", () => {
 
       const download = await service.openDownload(token, share.files[0].id);
       expect(download).toMatchObject({ name: "empty.txt", size: 0 });
-      expect(await buffer((download as Download).stream)).toHaveLength(0);
+      expect(await buffer(await (download as Download).read())).toHaveLength(0);
+    });
+  });
+
+  describe("tamper check", () => {
+    let keys: string[];
+    let errors: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      keys = [];
+      const createUpload = storage.createUpload;
+      storage.createUpload = (key, type) => (keys.push(key), createUpload(key, type));
+      errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    afterEach(() => errors.mockRestore());
+
+    async function readyFile(content: string) {
+      const share = await service.createShare(withFiles([file("a.txt", content.length)]));
+      await write(share.files[0].id, 0, content);
+      const { token } = await service.finalize(share.id);
+      return { token, fileId: share.files[0].id };
+    }
+
+    /** Swaps the stored object for `content`, as if someone wrote to the bucket directly. */
+    async function replaceObject(key: string, content: string) {
+      const { uploadId } = await storage.createUpload(key);
+      const part = await storage.writePart(key, uploadId, 1, body(content), content.length);
+      await storage.completeUpload(key, uploadId, [part]);
+    }
+
+    it("refuses and logs a file whose stored object was replaced, even at the same size", async () => {
+      const { token, fileId } = await readyFile("hello");
+      await replaceObject(keys[0], "HELLO");
+
+      await expect(service.openDownload(token, fileId)).rejects.toMatchObject({ code: "tampered" });
+      expect(errors).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`file ${fileId}.*ETag`)));
+    });
+
+    it("refuses and logs a file whose stored size no longer matches", async () => {
+      const { token, fileId } = await readyFile("hello");
+      await replaceObject(keys[0], "hello!");
+
+      await expect(service.openDownload(token, fileId)).rejects.toMatchObject({ code: "tampered" });
+      expect(errors).toHaveBeenCalledWith(expect.stringMatching(/size 6, expected 5/));
+    });
+
+    it("refuses to read an object replaced after the check", async () => {
+      const { token, fileId } = await readyFile("hello");
+      const download = (await service.openDownload(token, fileId)) as Download;
+      await replaceObject(keys[0], "HELLO");
+
+      await expect(download.read()).rejects.toMatchObject({ code: "tampered" });
+      expect(errors).toHaveBeenCalledOnce();
+    });
+
+    it("checks only the size of files completed before fingerprints were recorded", async () => {
+      const { token, fileId } = await readyFile("hello");
+      await db.update(schema.files).set({ fingerprintHash: null, fingerprintEtag: null });
+
+      const download = (await service.openDownload(token, fileId)) as Download;
+      expect((await buffer(await download.read())).toString()).toBe("hello");
+      expect(download.etag).toBe(`"${fileId}"`);
+      await replaceObject(keys[0], "hello!");
+      await expect(service.openDownload(token, fileId)).rejects.toMatchObject({ code: "tampered" });
+    });
+
+    it("serves an untouched file, with its fingerprint as the ETag", async () => {
+      const { token, fileId } = await readyFile("hello");
+      const download = (await service.openDownload(token, fileId)) as Download;
+      expect(download.etag).toBe(`"${chunkHashesFingerprint([sha256("hello")])}"`);
+      expect((await buffer(await download.read({ start: 1, end: 3 }))).toString()).toBe("ell");
+      expect(errors).not.toHaveBeenCalled();
     });
   });
 
@@ -333,7 +405,7 @@ describe("share service", () => {
       });
       for (const [i, content] of ["bb", "aaa", ""].entries()) {
         const download = await service.openDownload(token, share.files[i].id);
-        expect((await buffer((download as Download).stream)).toString()).toBe(content);
+        expect((await buffer(await (download as Download).read())).toString()).toBe(content);
       }
       expect(await db.select().from(schema.shares)).toHaveLength(1);
     });
@@ -368,7 +440,7 @@ describe("share service", () => {
       const { token } = await service.finalize(share.id);
       expect(calls).toBe(3);
       const download = await service.openDownload(token, share.files[1].id);
-      expect((await buffer((download as Download).stream)).toString()).toBe("b");
+      expect((await buffer(await (download as Download).read())).toString()).toBe("b");
     });
 
     it("creates nothing when storage fails partway through creating the share", async () => {

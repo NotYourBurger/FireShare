@@ -3,7 +3,13 @@ import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { schema, type Database } from "./db";
 import { chunkHashesFingerprint, verifiedChunk } from "./integrity";
-import { MIN_PART_SIZE, type StorageAdapter, type UploadedPart } from "./storage/adapter";
+import {
+  MIN_PART_SIZE,
+  ObjectChangedError,
+  type ByteRange,
+  type StorageAdapter,
+  type UploadedPart,
+} from "./storage/adapter";
 import { generateToken, hashToken } from "./tokens";
 
 const { shares, files } = schema;
@@ -13,7 +19,8 @@ export type ShareErrorCode =
   | "offset_mismatch"
   | "invalid_chunk"
   | "checksum_mismatch"
-  | "not_finalizable";
+  | "not_finalizable"
+  | "tampered";
 
 export class ShareError extends Error {
   constructor(
@@ -55,11 +62,23 @@ export interface Download {
   name: string;
   size: number;
   contentType: string;
-  stream: Readable;
+  /** Strong validator for the file's content, quoted as an HTTP ETag. */
+  etag: string;
+  /**
+   * Streams the file, or just `range` of it, from the object whose
+   * fingerprint was checked. Throws a `tampered` ShareError if the object
+   * changed since.
+   */
+  read(range?: ByteRange): Promise<Readable>;
 }
 
 /** What a share token leads to: the share, a share whose link has expired, or nothing. */
 type Lookup<T> = T | "expired" | null;
+
+function tampered(fileId: string, detail: string): ShareError {
+  console.error(`Refusing download of file ${fileId}: stored object doesn't match its fingerprint (${detail})`);
+  return new ShareError("tampered", "The stored file has changed since it was shared");
+}
 
 export function createShareService({
   db,
@@ -224,7 +243,9 @@ export function createShareService({
 
     /**
      * Resolves a share token and one of its files, "expired" once the link has
-     * expired, or null for anything else not downloadable.
+     * expired, or null for anything else not downloadable. Throws a `tampered`
+     * ShareError, and logs it, when the stored object's size or ETag no
+     * longer matches the fingerprint recorded at finalize.
      */
     async openDownload(token: string, fileId: string): Promise<Lookup<Download>> {
       const share = await findReadyShare(token);
@@ -233,13 +254,31 @@ export function createShareService({
       const file = await db.query.files.findFirst({
         where: and(eq(files.id, fileId), eq(files.shareId, share.id)),
       });
+      if (!file) return null;
+      const stored = await storage.head(file.storageKey);
       // A missing object must look exactly like an unknown token.
-      if (!file || !(await storage.head(file.storageKey))) return null;
+      if (!stored) return null;
+      if (stored.size !== file.size) {
+        throw tampered(file.id, `size ${stored.size}, expected ${file.size}`);
+      }
+      // Files completed before fingerprints were recorded can only be checked by size.
+      if (file.fingerprintEtag !== null && stored.etag !== file.fingerprintEtag) {
+        throw tampered(file.id, `ETag ${stored.etag}, expected ${file.fingerprintEtag}`);
+      }
       return {
         name: file.name,
         size: file.size,
         contentType: file.contentType,
-        stream: await storage.getReadStream(file.storageKey),
+        etag: `"${file.fingerprintHash ?? file.id}"`,
+        async read(range) {
+          try {
+            // ifMatch closes the gap between the check above and the read.
+            return await storage.getReadStream(file.storageKey, { range, ifMatch: stored.etag });
+          } catch (err) {
+            if (err instanceof ObjectChangedError) throw tampered(file.id, "ETag changed while opening");
+            throw err;
+          }
+        },
       };
     },
   };
