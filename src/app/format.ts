@@ -25,3 +25,14 @@ export function formatExpiry(value: string): string {
   const unit = match[2] === "h" ? "hour" : "day";
   return `${n} ${unit}${n === 1 ? "" : "s"}`;
 }
+
+/**
+ * A moment as a short date and time, e.g. "17 Oct 2026, 13:32". Without a
+ * time zone it's the viewer's own; servers pass "UTC", which is then named.
+ */
+export function formatDateTime(date: Date | string, timeZone?: string): string {
+  const text = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone }).format(
+    new Date(date),
+  );
+  return timeZone === "UTC" ? `${text} UTC` : text;
+}

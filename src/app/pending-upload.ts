@@ -1,3 +1,5 @@
+import { browserStorage } from "./browser-storage";
+
 /**
  * The share this browser is uploading, remembered so that reopening the page
  * after a closed tab or a crash can pick up where it stopped. Browsers can't
@@ -8,6 +10,8 @@ export interface PendingUpload {
   shareId: string;
   /** The expiry preset chosen, to show once the link is ready. */
   expiry: string;
+  /** The title as sent, for Recent shares; absent in records saved before titles were kept. */
+  title?: string | null;
   files: PendingFile[];
 }
 
@@ -20,17 +24,6 @@ export interface PendingFile {
 }
 
 const KEY = "fireshare.pendingUpload";
-
-type KeyValueStore = Pick<Storage, "getItem" | "setItem" | "removeItem">;
-
-/** localStorage, or null where it's blocked (private windows, disabled site data). */
-function browserStorage(): KeyValueStore | null {
-  try {
-    return globalThis.localStorage ?? null;
-  } catch {
-    return null;
-  }
-}
 
 export function savePendingUpload(pending: PendingUpload, store = browserStorage()) {
   try {
@@ -69,10 +62,11 @@ export function matchFiles(pending: PendingUpload, picked: File[]): (File | unde
 
 function isPendingUpload(value: unknown): value is PendingUpload {
   if (typeof value !== "object" || value === null) return false;
-  const { shareId, expiry, files } = value as Record<string, unknown>;
+  const { shareId, expiry, title, files } = value as Record<string, unknown>;
   return (
     typeof shareId === "string" &&
     typeof expiry === "string" &&
+    (title === undefined || title === null || typeof title === "string") &&
     Array.isArray(files) &&
     files.length > 0 &&
     files.every(

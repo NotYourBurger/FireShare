@@ -40,12 +40,14 @@ export function ShareView({ token, share }: { token: string; share: SharePage })
   );
 }
 
-/** Shown in place of the files once the share's link has expired. */
-export function ShareExpired() {
+/** Shown in place of the files once the share's link has expired or been deleted. */
+export function ShareUnavailable() {
   return (
     <main>
-      <h1>This link has expired</h1>
-      <p className="muted">The files it shared are no longer available. Ask the sender for a new link.</p>
+      <h1>This link is no longer available</h1>
+      <p className="muted">
+        It has expired or the sender deleted it, so its files can&apos;t be downloaded. Ask the sender for a new link.
+      </p>
     </main>
   );
 }

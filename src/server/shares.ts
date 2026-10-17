@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import { Readable } from "node:stream";
 import { schema, type Database } from "./db";
 import { createHash, randomUUID } from "node:crypto";
@@ -75,9 +75,26 @@ export interface Download {
   read(range?: ByteRange): Promise<Readable>;
 }
 
-/** What a share token leads to: the share, a share whose link has expired, or nothing. */
-type Lookup<T> = T | "expired" | null;
+/** Where a finalized share stands: serving, past its expiry, or deleted early by the uploader. */
+export type ShareStatus = "active" | "expired" | "deleted";
 
+/** What the holder of the management link sees. */
+export interface ManagedShare {
+  status: ShareStatus;
+  title: string | null;
+  message: string | null;
+  expiresAt: Date;
+  deletedAt: Date | null;
+  files: SharedFile[];
+}
+
+/**
+ * What a share token leads to: the share, "unavailable" once its link has
+ * expired or been deleted, or nothing.
+ */
+type Lookup<T> = T | "unavailable" | null;
+
+type ShareRow = typeof shares.$inferSelect;
 type FileRow = typeof files.$inferSelect;
 
 /** The file's CRC32 from its chunks', or null for files uploaded before CRC32s were recorded. */
@@ -100,12 +117,27 @@ export function createShareService({
   storage: StorageAdapter;
   now?: () => Date;
 }) {
-  async function findReadyShare(token: string): Promise<Lookup<typeof shares.$inferSelect>> {
+  function statusOf(share: ShareRow): ShareStatus {
+    if (share.status === "deleted") return "deleted";
+    return share.expiresAt && share.expiresAt > now() ? "active" : "expired";
+  }
+
+  /** Checked on every request, so expiry and deletion stop even a resume already under way. */
+  async function findSharedShare(token: string): Promise<Lookup<ShareRow>> {
     const share = await db.query.shares.findFirst({
-      where: and(eq(shares.tokenHash, hashToken(token)), eq(shares.status, "ready")),
+      where: and(eq(shares.tokenHash, hashToken(token)), inArray(shares.status, ["ready", "deleted"])),
     });
     if (!share) return null;
-    return share.expiresAt && share.expiresAt > now() ? share : "expired";
+    return statusOf(share) === "active" ? share : "unavailable";
+  }
+
+  function findManagedShare(managementToken: string) {
+    return db.query.shares.findFirst({
+      where: and(
+        eq(shares.managementTokenHash, hashToken(managementToken)),
+        inArray(shares.status, ["ready", "deleted"]),
+      ),
+    });
   }
 
   async function findPendingFile(fileId: string) {
@@ -220,7 +252,7 @@ export function createShareService({
     /**
      * Completes every file, checks its stored size and records its
      * fingerprint, then marks the share `ready`, starting its expiry;
-     * returns the share token once. If any file can't be completed the share stays `pending`, and a
+     * returns the share token and the management token, once. If any file can't be completed the share stays `pending`, and a
      * later call picks up where this one stopped.
      */
     async finalize(shareId: string) {
@@ -258,21 +290,28 @@ export function createShareService({
       }
 
       const token = generateToken();
+      const managementToken = generateToken();
       const readyAt = now();
       const expiresAt = new Date(readyAt.getTime() + share.expirySeconds * 1000);
       const updated = await db
         .update(shares)
-        .set({ status: "ready", tokenHash: hashToken(token), readyAt, expiresAt })
+        .set({
+          status: "ready",
+          tokenHash: hashToken(token),
+          managementTokenHash: hashToken(managementToken),
+          readyAt,
+          expiresAt,
+        })
         .where(and(eq(shares.id, shareId), eq(shares.status, "pending")))
         .returning({ id: shares.id });
       if (updated.length === 0) throw new ShareError("not_found", "No such pending share");
-      return { token };
+      return { token, managementToken, expiresAt };
     },
 
-    /** What a recipient sees for a share token, or null for anything not viewable. */
+    /** What a recipient sees for a share token, "unavailable", or null for anything else. */
     async viewShare(token: string): Promise<Lookup<SharePage>> {
-      const share = await findReadyShare(token);
-      if (!share || share === "expired") return share;
+      const share = await findSharedShare(token);
+      if (!share || share === "unavailable") return share;
       const shareFiles = await filesOf(share.id);
       return {
         title: share.title,
@@ -283,14 +322,14 @@ export function createShareService({
     },
 
     /**
-     * Resolves a share token and one of its files, "expired" once the link has
-     * expired, or null for anything else not downloadable. Throws a `tampered`
+     * Resolves a share token and one of its files, "unavailable" once the link
+     * has expired or been deleted, or null for anything else not downloadable. Throws a `tampered`
      * ShareError, and logs it, when the stored object's size or ETag no
      * longer matches the fingerprint recorded at finalize.
      */
     async openDownload(token: string, fileId: string): Promise<Lookup<Download>> {
-      const share = await findReadyShare(token);
-      if (!share || share === "expired") return share;
+      const share = await findSharedShare(token);
+      if (!share || share === "unavailable") return share;
       if (!isUuid(fileId)) return null;
       const file = await db.query.files.findFirst({
         where: and(eq(files.id, fileId), eq(files.shareId, share.id)),
@@ -310,13 +349,13 @@ export function createShareService({
 
     /**
      * The whole share as one store-only ZIP64, like {@link openDownload} for a
-     * file: "expired", or null for anything not downloadable, including a
+     * file: "unavailable", or null for anything not downloadable, including a
      * share with a file whose CRC32 isn't known. Every file's fingerprint is
      * checked before any bytes are served, and each read is guarded again.
      */
     async openArchive(token: string): Promise<Lookup<Download>> {
-      const share = await findReadyShare(token);
-      if (!share || share === "expired") return share;
+      const share = await findSharedShare(token);
+      if (!share || share === "unavailable") return share;
       const shareFiles = await filesOf(share.id);
       const crcs = shareFiles.map(fileCrc32);
       if (crcs.some((crc) => crc === null)) return null;
@@ -338,6 +377,35 @@ export function createShareService({
         etag: `"${version}"`,
         read: async (range) => zip.read(range),
       };
+    },
+
+    /** The share a management token belongs to, whatever its status, or null. */
+    async manageShare(managementToken: string): Promise<ManagedShare | null> {
+      const share = await findManagedShare(managementToken);
+      if (!share?.expiresAt) return null;
+      const shareFiles = await filesOf(share.id);
+      return {
+        status: statusOf(share),
+        title: share.title,
+        message: share.message,
+        expiresAt: share.expiresAt,
+        deletedAt: share.deletedAt,
+        files: shareFiles.map(({ id, name, size }) => ({ id, name, size })),
+      };
+    },
+
+    /**
+     * Deletes the share early: its link stops serving at once, exactly as if
+     * it had expired. Deleting again changes nothing. Returns false for an
+     * unknown management token.
+     */
+    async deleteShare(managementToken: string): Promise<boolean> {
+      const deleted = await db
+        .update(shares)
+        .set({ status: "deleted", deletedAt: now() })
+        .where(and(eq(shares.managementTokenHash, hashToken(managementToken)), eq(shares.status, "ready")))
+        .returning({ id: shares.id });
+      return deleted.length > 0 || (await findManagedShare(managementToken)) !== undefined;
     },
   };
 }

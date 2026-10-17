@@ -125,8 +125,10 @@ describe("HTTP API", () => {
 
     const finalized = await finalize(id);
     expect(finalized.status).toBe(200);
-    const { path } = await finalized.json();
+    const { path, managementPath, expiresAt } = await finalized.json();
     expect(path).toMatch(/^\/d\/[A-Za-z0-9_-]{22}$/);
+    expect(managementPath).toMatch(/^\/m\/[A-Za-z0-9_-]{22}$/);
+    expect(expiresAt).toBe("2026-01-02T00:00:00.000Z");
 
     const res = await download(`${path}/files/${files[0].id}`);
     expect(res.status).toBe(200);
@@ -564,10 +566,71 @@ describe("HTTP API", () => {
         expect(res.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
         expect(res.headers.get("Content-Disposition")).toBeNull();
         expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-        expect(await res.text()).toContain("This link has expired");
+        expect(await res.text()).toContain("This link is no longer available");
       }
-      expect(await http.viewShare(path.split("/")[2])).toBe("expired");
+      expect(await http.viewShare(path.split("/")[2])).toBe("unavailable");
     });
+  });
+});
+
+describe("management link", () => {
+  /** Creates, uploads and finalizes a one-file share; returns its file's download path and management token. */
+  async function managedShare(data: string) {
+    const created = await (await createShare([{ name: "a.txt", size: Buffer.byteLength(data) }], { title: "Shot 12" })).json();
+    await patch(created.files[0].id, 0, data);
+    const { path, managementPath } = await (await finalize(created.id)).json();
+    return { filePath: `${path}/files/${created.files[0].id}`, managementToken: managementPath.slice("/m/".length) };
+  }
+
+  const getManaged = (token: string) => http.getManaged(new Request(`${origin}/api/manage/${token}`), token);
+  const deleteManaged = (token: string) =>
+    http.deleteManaged(new Request(`${origin}/api/manage/${token}`, { method: "DELETE" }), token);
+
+  it("reports the share's status and details without caching", async () => {
+    const { managementToken } = await managedShare("abc");
+    const res = await getManaged(managementToken);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(await res.json()).toMatchObject({
+      status: "active",
+      title: "Shot 12",
+      expiresAt: "2026-01-02T00:00:00.000Z",
+      deletedAt: null,
+      files: [{ name: "a.txt", size: 3 }],
+    });
+  });
+
+  it("stops downloads, including resumes, as soon as the share is deleted", async () => {
+    const { filePath, managementToken } = await managedShare("0123456789");
+    const first = await download(filePath);
+    expect(first.status).toBe(200);
+
+    expect((await deleteManaged(managementToken)).status).toBe(204);
+
+    const resume = { Range: "bytes=5-", "If-Range": first.headers.get("ETag")! };
+    for (const headers of [{}, resume] as Record<string, string>[]) {
+      const res = await download(filePath, headers);
+      expect(res.status).toBe(410);
+      expect(res.headers.get("Content-Disposition")).toBeNull();
+      expect(await res.text()).toContain("This link is no longer available");
+    }
+    expect((await http.downloadAll(new Request(`${origin}/d/x/all`), filePath.split("/")[2])).status).toBe(410);
+    expect(await (await getManaged(managementToken)).json()).toMatchObject({ status: "deleted" });
+  });
+
+  it("answers deleting again with success", async () => {
+    const { managementToken } = await managedShare("a");
+    await deleteManaged(managementToken);
+    expect((await deleteManaged(managementToken)).status).toBe(204);
+  });
+
+  it("answers unknown management tokens, and share tokens, with 404", async () => {
+    const { filePath } = await managedShare("a");
+    for (const token of [generateToken(), filePath.split("/")[2], "<script>"]) {
+      expect((await getManaged(token)).status).toBe(404);
+      expect((await deleteManaged(token)).status).toBe(404);
+    }
+    expect((await download(filePath)).status).toBe(200);
   });
 });
 

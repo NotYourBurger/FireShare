@@ -588,7 +588,7 @@ describe("share service", () => {
       const token = await readyShare(["a.txt"], ["a"]);
       expect(await service.openArchive(generateToken())).toBeNull();
       advance(7 * DAY);
-      expect(await service.openArchive(token)).toBe("expired");
+      expect(await service.openArchive(token)).toBe("unavailable");
     });
   });
 
@@ -608,8 +608,8 @@ describe("share service", () => {
       expect(await service.openDownload(token, fileId)).toMatchObject({ name: "a.txt" });
 
       advance(1);
-      expect(await service.viewShare(token)).toBe("expired");
-      expect(await service.openDownload(token, fileId)).toBe("expired");
+      expect(await service.viewShare(token)).toBe("unavailable");
+      expect(await service.openDownload(token, fileId)).toBe("unavailable");
     });
 
     it("counts expiry from when the share becomes ready, not from when the upload started", async () => {
@@ -619,9 +619,9 @@ describe("share service", () => {
       const { token } = await service.finalize(share.id);
 
       advance(DAY - 1);
-      expect(await service.viewShare(token)).not.toBe("expired");
+      expect(await service.viewShare(token)).not.toBe("unavailable");
       advance(1);
-      expect(await service.viewShare(token)).toBe("expired");
+      expect(await service.viewShare(token)).toBe("unavailable");
     });
 
     it("records when the share expires", async () => {
@@ -634,14 +634,108 @@ describe("share service", () => {
     it("reports an expired share as expired whichever file is asked for", async () => {
       const { token } = await readyShare(DAY);
       advance(DAY);
-      expect(await service.openDownload(token, crypto.randomUUID())).toBe("expired");
-      expect(await service.openDownload(token, "not-a-uuid")).toBe("expired");
+      expect(await service.openDownload(token, crypto.randomUUID())).toBe("unavailable");
+      expect(await service.openDownload(token, "not-a-uuid")).toBe("unavailable");
     });
 
     it("still shows nothing for an unknown token", async () => {
       await readyShare(DAY);
       advance(DAY);
       expect(await service.viewShare(generateToken())).toBeNull();
+    });
+  });
+
+  describe("management link", () => {
+    async function readyShare() {
+      const share = await service.createShare({
+        ...withFiles([file("a.txt", 1), file("b.txt", 2)], DAY),
+        title: "Shot 12",
+        message: "Final grade",
+      });
+      await uploadAll(share, ["a", "bb"]);
+      const { token, managementToken } = await service.finalize(share.id);
+      return { token, managementToken, fileIds: share.files.map((f) => f.id) };
+    }
+
+    it("is issued with the share link, as a different 128-bit token, and stored only as a hash", async () => {
+      const { token, managementToken } = await readyShare();
+      expect(managementToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+      expect(managementToken).not.toBe(token);
+
+      const rows = await db.select().from(schema.shares);
+      expect(JSON.stringify(rows)).not.toContain(managementToken);
+      expect(rows[0].managementTokenHash).toBe(hashToken(managementToken));
+    });
+
+    it("shows the share's status, expiry, title, message and files", async () => {
+      const { managementToken } = await readyShare();
+      expect(await service.manageShare(managementToken)).toEqual({
+        status: "active",
+        title: "Shot 12",
+        message: "Final grade",
+        expiresAt: new Date("2026-01-02T00:00:00Z"),
+        deletedAt: null,
+        files: [
+          { id: expect.any(String), name: "a.txt", size: 1 },
+          { id: expect.any(String), name: "b.txt", size: 2 },
+        ],
+      });
+      advance(DAY);
+      expect(await service.manageShare(managementToken)).toMatchObject({ status: "expired" });
+    });
+
+    it("doesn't open the share through the share token, nor the other way round", async () => {
+      const { token, managementToken, fileIds } = await readyShare();
+      expect(await service.manageShare(token)).toBeNull();
+      expect(await service.deleteShare(token)).toBe(false);
+      expect(await service.viewShare(managementToken)).toBeNull();
+      expect(await service.openDownload(managementToken, fileIds[0])).toBeNull();
+    });
+
+    it("shows nothing for an unknown token", async () => {
+      await readyShare();
+      expect(await service.manageShare(generateToken())).toBeNull();
+      expect(await service.deleteShare(generateToken())).toBe(false);
+    });
+
+    it("deletes the share: its link stops serving at once, like an expired one", async () => {
+      const { token, managementToken, fileIds } = await readyShare();
+      advance(60);
+      expect(await service.deleteShare(managementToken)).toBe(true);
+
+      expect(await service.viewShare(token)).toBe("unavailable");
+      expect(await service.openDownload(token, fileIds[0])).toBe("unavailable");
+      expect(await service.openArchive(token)).toBe("unavailable");
+      expect(await service.manageShare(managementToken)).toMatchObject({
+        status: "deleted",
+        deletedAt: new Date("2026-01-01T00:01:00Z"),
+        files: [{ name: "a.txt" }, { name: "b.txt" }],
+      });
+    });
+
+    it("keeps the first deletion time when deleted again", async () => {
+      const { managementToken } = await readyShare();
+      await service.deleteShare(managementToken);
+      advance(60);
+      expect(await service.deleteShare(managementToken)).toBe(true);
+      expect(await service.manageShare(managementToken)).toMatchObject({
+        status: "deleted",
+        deletedAt: new Date("2026-01-01T00:00:00Z"),
+      });
+    });
+
+    it("shows a deleted share as deleted even after its expiry", async () => {
+      const { managementToken } = await readyShare();
+      await service.deleteShare(managementToken);
+      advance(2 * DAY);
+      expect(await service.manageShare(managementToken)).toMatchObject({ status: "deleted" });
+    });
+
+    it("leaves other shares serving", async () => {
+      const first = await readyShare();
+      const second = await readyShare();
+      await service.deleteShare(first.managementToken);
+      expect(await service.viewShare(second.token)).toMatchObject({ title: "Shot 12" });
     });
   });
 });

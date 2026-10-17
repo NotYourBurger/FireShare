@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getApp } from "@/server/app";
-import { ShareExpired, ShareView } from "./share-view";
+import { ShareUnavailable, ShareView } from "./share-view";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +14,6 @@ export default async function SharePage({ params }: { params: Promise<{ token: s
   const { token } = await params;
   const share = await (await getApp()).viewShare(token);
   if (!share) notFound();
-  if (share === "expired") return <ShareExpired />;
+  if (share === "unavailable") return <ShareUnavailable />;
   return <ShareView token={token} share={share} />;
 }
