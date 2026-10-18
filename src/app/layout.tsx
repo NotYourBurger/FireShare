@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Anton, Geist } from "next/font/google";
 import { EditorialShell } from "./editorial-shell";
 import "./globals.css";
-import { fetchRandomQuote, pickRandomBackdrop } from "./quote";
+import { currentQuote, pickRandomBackdrop } from "./quote";
 
 // Downloaded at build time and served by the app.
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
@@ -16,8 +16,9 @@ export const metadata: Metadata = {
   referrer: "no-referrer",
 };
 
-export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const [quote, backdrop] = await Promise.all([fetchRandomQuote(), Promise.resolve(pickRandomBackdrop())]);
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  const quote = currentQuote();
+  const backdrop = pickRandomBackdrop();
   return (
     <html lang="en" className={`${geist.variable} ${anton.variable}`} suppressHydrationWarning>
       <body>
