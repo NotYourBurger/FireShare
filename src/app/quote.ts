@@ -8,9 +8,7 @@ export interface EditorialBackdrop {
   label: string;
   series: string;
   caption: string;
-  /** Primary high-resolution atmospheric photograph. */
-  photoUrl: string;
-  /** Bundled local primary backdrop for instant/offline reliability. */
+  /** Bundled photograph, served by the app (see public/backdrops/CREDITS.md). */
   localPhotoUrl: string;
   /** Dynamic 3-stop aurora gradient palette synced to this visual study. */
   colors: [string, string, string];
@@ -36,10 +34,6 @@ const FALLBACK_QUOTES: Quote[] = [
     author: "Dieter Rams",
   },
   {
-    quote: "Silence is not an absence, but a manifestation of space, form, and intention.",
-    author: "Visual Silence",
-  },
-  {
     quote: "Simplicity is about subtracting the obvious and adding the meaningful.",
     author: "John Maeda",
   },
@@ -55,7 +49,6 @@ export const EDITORIAL_BACKDROPS: EditorialBackdrop[] = [
     label: "Stillness",
     series: "STUDY 01 · ARCHITECTURAL SILENCE",
     caption: "By reducing noise, attention shifts toward space, form, and kinetic intention.",
-    photoUrl: "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1800&q=85",
     localPhotoUrl: "/backdrops/1323550-1800.jpg",
     colors: ["#ff5a1f", "#e79aae", "#6b8cce"],
     fallbackGradient:
@@ -66,7 +59,6 @@ export const EDITORIAL_BACKDROPS: EditorialBackdrop[] = [
     label: "Horizon",
     series: "STUDY 02 · ATMOSPHERIC DEPTH",
     caption: "In a moving world of light and blur, clarity emerges from motion.",
-    photoUrl: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1800&q=85",
     localPhotoUrl: "/backdrops/2014422-1800.jpg",
     colors: ["#f58549", "#5c9ead", "#d49a72"],
     fallbackGradient:
@@ -77,7 +69,6 @@ export const EDITORIAL_BACKDROPS: EditorialBackdrop[] = [
     label: "Refraction",
     series: "STUDY 03 · OPTICAL GLASS",
     caption: "Space becomes an active living medium rather than a static background.",
-    photoUrl: "https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=1800&q=85",
     localPhotoUrl: "/backdrops/1287145-1800.jpg",
     colors: ["#e84e1b", "#9b7ede", "#68b0ab"],
     fallbackGradient:
@@ -88,7 +79,6 @@ export const EDITORIAL_BACKDROPS: EditorialBackdrop[] = [
     label: "Velocity",
     series: "STUDY 04 · VISUAL RESTRAINT",
     caption: "With fewer components present, tension between scale and motion becomes clear.",
-    photoUrl: "https://images.unsplash.com/photo-1494438639946-1ebd1d20bf85?auto=format&fit=crop&w=1800&q=85",
     localPhotoUrl: "/backdrops/2559941-1800.jpg",
     colors: ["#ff6b2c", "#c45baa", "#4ea8de"],
     fallbackGradient:
@@ -99,7 +89,6 @@ export const EDITORIAL_BACKDROPS: EditorialBackdrop[] = [
     label: "Aurora",
     series: "STUDY 05 · SHADOW & GRAIN",
     caption: "Every transfer is guided by velocity, balance, and quiet impermanence.",
-    photoUrl: "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?auto=format&fit=crop&w=1800&q=85",
     localPhotoUrl: "/backdrops/3408744-1800.jpg",
     colors: ["#38d399", "#4f7cac", "#ff5a1f"],
     fallbackGradient:
@@ -121,7 +110,7 @@ export function pickFallbackQuote(): Quote {
  * Fetches a random quote from https://zenquotes.io/api/random with a timeout,
  * or null when the network or API fails or the API is rate limiting us.
  */
-async function fetchLiveQuote(): Promise<Quote | null> {
+export async function fetchLiveQuote(): Promise<Quote | null> {
   try {
     const res = await fetch("https://zenquotes.io/api/random", {
       cache: "no-store",
@@ -189,9 +178,3 @@ export function createQuoteCache({
   };
 }
 
-const quoteCache = createQuoteCache();
-
-/** A quote for this request, without waiting on the network. */
-export function currentQuote(): Quote {
-  return quoteCache.quote();
-}

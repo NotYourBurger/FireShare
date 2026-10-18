@@ -47,6 +47,7 @@ services:
       ALLOW_INSECURE_DIRECT_ENDPOINT: ${ALLOW_INSECURE_DIRECT_ENDPOINT:-}
       APP_ORIGIN: ${APP_ORIGIN:-}
       DIRECT_NETWORKS: ${DIRECT_NETWORKS:-}
+      QUOTES: ${QUOTES:-}
     ports:
       - "${APP_PORT:-3000}:3000"
     volumes:

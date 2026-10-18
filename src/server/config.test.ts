@@ -5,12 +5,14 @@ import { describe, expect, it } from "vitest";
 import {
   ConfigError,
   configProblems,
+  configWarnings,
   describeConfigProblems,
   loadAccessConfig,
   loadCleanupConfig,
   loadConfig,
   loadExpiryConfig,
   loadLimitsConfig,
+  loadQuotesConfig,
   loadTransferConfig,
   loadUploadConfig,
 } from "./config";
@@ -466,6 +468,51 @@ describe("access config", () => {
   });
 });
 
+
+describe("quotes config", () => {
+  it("fetches live quotes unless QUOTES=offline", () => {
+    expect(loadQuotesConfig({})).toEqual({ live: true });
+    expect(loadQuotesConfig({ QUOTES: "live" })).toEqual({ live: true });
+    expect(loadQuotesConfig({ QUOTES: "offline" })).toEqual({ live: false });
+  });
+
+  it("rejects an invalid QUOTES", () => {
+    expect(configProblems(() => loadQuotesConfig({ QUOTES: "off" }))).toEqual(['Invalid QUOTES "off": use live or offline']);
+  });
+});
+
+describe("startup warnings", () => {
+  it("has nothing to say about the defaults", () => {
+    expect(configWarnings({ UPLOAD_PASSWORD: "p" })).toEqual([]);
+  });
+
+  it("warns that an http:// direct endpoint sends presigned URLs unencrypted", () => {
+    const env = { ALLOW_INSECURE_DIRECT_ENDPOINT: "true", STORAGE_DIRECT_ENDPOINT: "http://192.168.1.10:3900" };
+    expect(configWarnings(env)).toEqual([expect.stringMatching(/^ALLOW_INSECURE_DIRECT_ENDPOINT=true: presigned/)]);
+    expect(configWarnings({ ...env, STORAGE_DIRECT_ENDPOINT: "https://storage.lan" })).toEqual([]);
+  });
+
+  it("warns about public uploads with no quota", () => {
+    const env = { ALLOW_PUBLIC_UPLOAD: "true", ABUSE_CONTACT: "abuse@example.com" };
+    expect(configWarnings(env)).toEqual([expect.stringMatching(/^ALLOW_PUBLIC_UPLOAD=true with no quotas/)]);
+    expect(configWarnings({ ...env, UPLOAD_QUOTA_PER_IP: "10GB" })).toEqual([]);
+  });
+
+  it("warns that direct transfers without APP_ORIGIN guess the CORS origin", () => {
+    const env = { TRANSFER_MODE: "direct", STORAGE_DIRECT_ENDPOINT: "https://storage.lan" };
+    expect(configWarnings(env)).toEqual([expect.stringMatching(/^TRANSFER_MODE=direct without APP_ORIGIN/)]);
+    expect(configWarnings({ ...env, APP_ORIGIN: "https://share.lan" })).toEqual([]);
+  });
+
+  it("warns when the app is served over plain HTTP anywhere but localhost", () => {
+    expect(configWarnings({ APP_ORIGIN: "http://192.168.1.10:3000" })).toEqual([
+      expect.stringMatching(/^APP_ORIGIN is http:\/\/192\.168\.1\.10:3000: browsers upload/),
+    ]);
+    for (const origin of ["http://localhost:3000", "http://127.0.0.1:3000", "https://share.example.com"]) {
+      expect(configWarnings({ APP_ORIGIN: origin }), origin).toEqual([]);
+    }
+  });
+});
 
 describe("startup validation", () => {
   const valid = {

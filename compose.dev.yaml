@@ -1,0 +1,10 @@
+# For development only: publishes the bundled database and storage on
+# localhost so `pnpm dev` can use them. See CONTRIBUTING.md.
+#   docker compose -f compose.yaml -f compose.dev.yaml up -d db storage-init
+services:
+  db:
+    networks: [internal, public]
+    ports: ["127.0.0.1:5432:5432"]
+  storage:
+    networks: [internal, public]
+    ports: ["127.0.0.1:3900:3900"]

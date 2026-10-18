@@ -1,0 +1,48 @@
+name: Bug report
+description: Something doesn't work as documented.
+labels: [needs-triage]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Set TRANSFER_MODE=auto …
+        2. Upload a 2 GB file from …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: FireShare version
+      description: FIRESHARE_VERSION from .env, or the commit if you build from source.
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Transfer mode
+      options: [proxy (default), direct, auto]
+  - type: input
+    id: setup
+    attributes:
+      label: How it's hosted
+      placeholder: e.g. Synology DSM reverse proxy, Caddy, plain localhost; host OS and architecture
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Output of `docker compose logs app worker storage storage-init`. Remove any secrets.
+      render: text
+  - type: textarea
+    id: env
+    attributes:
+      label: Relevant settings
+      description: The lines from .env that matter. **Remove every password, token and secret.**
+      render: sh

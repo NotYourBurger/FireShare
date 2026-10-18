@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { currentQuote, pickRandomBackdrop } from "@/app/quote";
+import { currentQuote } from "@/app/current-quote";
+import { pickRandomBackdrop } from "@/app/quote";
 
 export const dynamic = "force-dynamic";
 

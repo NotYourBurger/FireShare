@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest an idea or improvement.
+labels: [needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: Check the [roadmap](https://github.com/NotYourBurger/FireShare/blob/main/vision.md#roadmap) and the non-goals first. FireShare deliberately isn't a cloud drive or a collaboration tool.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would it solve?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to happen?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
