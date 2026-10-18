@@ -1,5 +1,5 @@
 import { and, asc, count, eq, gt, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
-import { Readable } from "node:stream";
+import type { Readable } from "node:stream";
 import type { LimitsConfig } from "./config";
 import { schema, type Database } from "./db";
 import { createHash, randomUUID } from "node:crypto";
@@ -10,7 +10,6 @@ import {
   type ByteRange,
   type StorageAdapter,
   type StoredPart,
-  type UploadedPart,
 } from "./storage/adapter";
 import { generateToken, hashToken } from "./tokens";
 import { createStreamingZip, createZip, safeFileName, zipEntryNames } from "./zip";
@@ -503,17 +502,16 @@ export function createShareService({
 
       for (const file of shareFiles) {
         if (file.completedAt) continue;
-        let partsToComplete: UploadedPart[];
         let partsForDb: schema.FilePart[];
         if (file.size === 0) {
-          // A multipart upload needs at least one part, even an empty one.
-          partsToComplete = [await storage.writePart(file.storageKey, file.multipartUploadId, 1, Readable.from([]), 0)];
+          // A multipart upload needs at least one part, and not every server takes an empty one.
+          await storage.abortUpload(file.storageKey, file.multipartUploadId);
+          await storage.putEmpty(file.storageKey, file.contentType);
           partsForDb = file.parts;
         } else {
           partsForDb = resolvedParts.get(file.id)!;
-          partsToComplete = partsForDb;
+          await storage.completeUpload(file.storageKey, file.multipartUploadId, partsForDb);
         }
-        await storage.completeUpload(file.storageKey, file.multipartUploadId, partsToComplete);
         const stored = await storage.head(file.storageKey);
         if (stored?.size !== file.size) {
           await storage.delete(file.storageKey);

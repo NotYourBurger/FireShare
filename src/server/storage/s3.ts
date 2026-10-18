@@ -9,6 +9,7 @@ import {
   HeadObjectCommand,
   ListPartsCommand,
   PutBucketCorsCommand,
+  PutObjectCommand,
   S3Client,
   S3ServiceException,
   UploadPartCommand,
@@ -37,7 +38,7 @@ export interface S3Storage extends StorageAdapter {
   ensureCors(origin: string): Promise<void>;
 }
 
-/** The v1 storage driver: any S3-compatible API (RustFS by default). */
+/** The v1 storage driver: any S3-compatible API (Garage by default). */
 export function createS3Storage(config: S3StorageConfig): S3Storage {
   const { bucket } = config;
   const presignConfig = {
@@ -181,6 +182,12 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
         // NoSuchUpload: already aborted or completed.
         if (!isNotFound(err)) throw err;
       }
+    },
+
+    async putEmpty(key, contentType) {
+      await client.send(
+        new PutObjectCommand({ Bucket: bucket, Key: key, Body: new Uint8Array(0), ContentLength: 0, ContentType: contentType }),
+      );
     },
 
     async getReadStream(key, { range, ifMatch } = {}) {

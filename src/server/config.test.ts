@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   ConfigError,
@@ -139,6 +142,30 @@ describe("transfer config", () => {
         STORAGE_DIRECT_ENDPOINT: "http://storage.lan.example.com",
       }),
     ).toThrow(/^Invalid STORAGE_DIRECT_ENDPOINT/);
+  });
+
+  describe("storage key from files", () => {
+    const base = { DATABASE_URL: "postgres://x", S3_ENDPOINT: "http://x", S3_BUCKET: "fireshare" };
+    const files = () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "fireshare-config-"));
+      writeFileSync(path.join(dir, "id"), "GKabc\n");
+      writeFileSync(path.join(dir, "secret"), "s3cret\n");
+      return { S3_ACCESS_KEY_ID_FILE: path.join(dir, "id"), S3_SECRET_ACCESS_KEY_FILE: path.join(dir, "secret") };
+    };
+
+    it("reads S3_ACCESS_KEY_ID_FILE and S3_SECRET_ACCESS_KEY_FILE, trimmed", () => {
+      expect(loadConfig({ ...base, ...files() }).s3).toMatchObject({ accessKeyId: "GKabc", secretAccessKey: "s3cret" });
+    });
+
+    it("prefers the variable over its file", () => {
+      expect(loadConfig({ ...base, ...files(), S3_ACCESS_KEY_ID: "k" }).s3.accessKeyId).toBe("k");
+    });
+
+    it("names a file it can't read", () => {
+      expect(() =>
+        loadConfig({ ...base, S3_ACCESS_KEY_ID_FILE: "/no/such/file", S3_SECRET_ACCESS_KEY: "s" }),
+      ).toThrow(/^Can't read S3_ACCESS_KEY_ID_FILE "\/no\/such\/file"/);
+    });
   });
 
   it("stops the app at startup when auto mode has no DIRECT_NETWORKS", () => {
@@ -484,7 +511,7 @@ describe("startup validation", () => {
 
   it("checks the storage endpoint and bucket name", () => {
     expect(configProblems(() => loadConfig({ ...valid, S3_ENDPOINT: "storage:9000" }))).toEqual([
-      'Invalid S3_ENDPOINT "storage:9000": use an http(s) URL, like http://storage:9000',
+      'Invalid S3_ENDPOINT "storage:9000": use an http(s) URL, like http://storage:3900',
     ]);
     for (const bucket of ["ab", "FireShare", "fire_share", "-fireshare", "x".repeat(64)]) {
       expect(configProblems(() => loadConfig({ ...valid, S3_BUCKET: bucket })), bucket).toEqual([

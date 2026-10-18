@@ -78,6 +78,11 @@ export interface StorageAdapter {
    * upload no longer exists, whether aborted or completed.
    */
   abortUpload(key: string, uploadId: string): Promise<void>;
+  /**
+   * Stores an empty object at `key`. Empty files skip multipart uploads:
+   * some S3-compatible servers (Garage) refuse an empty part.
+   */
+  putEmpty(key: string, contentType?: string): Promise<void>;
   getReadStream(key: string, options?: ReadOptions): Promise<Readable>;
   /** Issues a short-lived URL signed for one storage key and one action. */
   getPresignedUrl(request: PresignedUrlRequest): Promise<string>;

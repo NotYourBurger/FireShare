@@ -16,7 +16,7 @@ You need Docker with Compose v2, on any x86_64 or ARM64 machine.
    cp .env.example .env
    ```
 
-2. Open `.env` and replace every `change-me…` value with its own long random secret, for example the output of `openssl rand -hex 24`. `UPLOAD_PASSWORD` is the password uploaders type in, so pick something you can share with them.
+2. Open `.env` and replace every `change-me…` value with its own long random secret, for example the output of `openssl rand -hex 24`. `GARAGE_RPC_SECRET` must be exactly 64 hex characters: use `openssl rand -hex 32`. `UPLOAD_PASSWORD` is the password uploaders type in, so pick something you can share with them.
 
 3. Start it:
 
@@ -28,7 +28,7 @@ You need Docker with Compose v2, on any x86_64 or ARM64 machine.
 
 4. Open <http://localhost:3000>, enter the upload password, pick some files and press upload. You get a **share link** to send to recipients, and a **management link** to keep for yourself: it shows the share's status and lets you delete it early.
 
-If the app doesn't come up, `docker compose logs app worker storage-init` tells you why. A bad setting stops the app at startup with a list of each variable to fix.
+If the app doesn't come up, `docker compose logs app worker storage storage-init` tells you why. A bad setting stops the app at startup with a list of each variable to fix.
 
 ## Configuration
 
@@ -55,12 +55,14 @@ docker compose up -d
 
 Database migrations run automatically when the app starts. Pin a release with `FIRESHARE_VERSION` in `.env`, or set it to `main` to follow the newest build. To build the images from your checkout instead, run `docker compose up -d --build`.
 
+**Upgrading from a version with RustFS storage:** the bundled storage is now [Garage](https://garagehq.deuxfleurs.fr), which needs far less memory, and files already shared aren't moved over. Let your current shares expire first, then set `GARAGE_RPC_SECRET` and `GARAGE_ADMIN_TOKEN` in `.env` (see `.env.example`), remove the `RUSTFS_*`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` and `S3_REGION` lines, and run `docker compose up -d --remove-orphans`. The app's storage key is now created for you. Once it works, `docker volume rm` the old storage volume to free its space (`docker volume ls` names it).
+
 **Upgrading from a version without `RUSTFS_ROOT_ACCESS_KEY`:** the app now has its own storage key. Move your old `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` values to `RUSTFS_ROOT_ACCESS_KEY` and `RUSTFS_ROOT_SECRET_KEY`, then set `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` to a new key name and secret.
 
 ## Security
 
 - The storage API is never published: it's only on an internal Docker network with no route in or out (plus, in direct mode, the LAN-only HTTPS endpoint you configure).
-- The bucket is private, and the app's storage key can access only that bucket. The storage root key is used only by the one-off `storage-init` container.
+- The bucket is private, and the app's storage key, created by Garage on first start, can access only that bucket. The storage admin token is used only by the one-off `storage-init` container.
 - Every container runs as a non-root user with `no-new-privileges`, no Linux capabilities and a memory limit.
 - Uploads need a password unless you explicitly make them public.
 
