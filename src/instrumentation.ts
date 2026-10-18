@@ -5,12 +5,10 @@ export async function register() {
 
     // A setting that keeps the app from running safely stops it here, before
     // anyone can use it.
-    const { loadAccessConfig, loadConfig } = await import("./server/config");
-    try {
-      loadConfig();
-      loadAccessConfig();
-    } catch (err) {
-      console.error(`FireShare can't start: ${err instanceof Error ? err.message : err}`);
+    const { configProblems, describeConfigProblems, loadAccessConfig, loadConfig } = await import("./server/config");
+    const problems = configProblems(loadConfig, loadAccessConfig);
+    if (problems.length > 0) {
+      console.error(describeConfigProblems("FireShare", problems));
       process.exit(1);
     }
 

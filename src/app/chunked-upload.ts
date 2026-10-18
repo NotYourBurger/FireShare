@@ -48,7 +48,8 @@ export function uploadFile(file: Blob, uploadUrl: string, options: ChunkedUpload
       chunkSize: options.chunkSize,
       retryDelays: options.retryDelays ?? DEFAULT_RETRY_DELAYS,
       storeFingerprintForResuming: false,
-      httpStack: options.httpStack,
+      // tus merges options over its defaults, so an undefined stack would replace the browser's.
+      ...(options.httpStack && { httpStack: options.httpStack }),
       fileReader: {
         async openFile(input: Blob) {
           return {

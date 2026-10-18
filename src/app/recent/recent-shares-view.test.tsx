@@ -18,7 +18,7 @@ describe("recent shares page", () => {
     expect(render([])).toContain("private windows");
   });
 
-  it("shows each share's status, with its share link only while active", () => {
+  it("shows each share's status, with its share link to open or copy only while active", () => {
     const entries = [entry(1), entry(2), entry(3), entry(4, null)];
     const html = render(entries, {
       "http://x/m/manage1": "active",
@@ -31,12 +31,14 @@ describe("recent shares page", () => {
     expect(html).toContain("Deleted");
     expect(html).toContain("No longer available");
     expect(html).toContain("Shared files");
-    expect(html).toContain('value="http://x/d/share1"');
+    expect(html).toContain('href="http://x/d/share1"');
+    expect(html).toContain('aria-label="Copy share link for Share 1"');
+    expect(html.match(/>Copy link</g)).toHaveLength(1);
     for (const n of [2, 3, 4]) expect(html).not.toContain(`http://x/d/share${n}`);
     // Every entry can be managed and removed, except a share the server no longer knows.
     for (const n of [1, 2, 3]) expect(html).toContain(`href="http://x/m/manage${n}"`);
     expect(html).not.toContain('href="http://x/m/manage4"');
-    expect(html.match(/>Remove from list</g)).toHaveLength(4);
+    expect(html.match(/aria-label="Remove [^"]+ from this list"/g)).toHaveLength(4);
   });
 
   it("goes by the remembered expiry until the server answers", () => {

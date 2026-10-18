@@ -3,23 +3,100 @@ import { MAX_PART_SIZE, MIN_PART_SIZE } from "./storage/adapter";
 
 type Env = Record<string, string | undefined>;
 
-/** Configuration from the environment (see .env.example). */
-export function loadConfig(env: Env = process.env) {
-  return {
-    databaseUrl: required(env, "DATABASE_URL"),
-    s3: {
-      endpoint: required(env, "S3_ENDPOINT"),
-      region: env.S3_REGION || "us-east-1",
-      bucket: required(env, "S3_BUCKET"),
-      accessKeyId: required(env, "S3_ACCESS_KEY_ID"),
-      secretAccessKey: required(env, "S3_SECRET_ACCESS_KEY"),
-    },
-    transfer: loadTransferConfig(env),
-    expiry: loadExpiryConfig(env),
-    upload: loadUploadConfig(env),
-    limits: loadLimitsConfig(env),
-    cleanup: loadCleanupConfig(env),
+/** Every problem found in the configuration, one message per bad variable. */
+export class ConfigError extends Error {
+  constructor(readonly problems: string[]) {
+    super(problems.join("\n"));
+    this.name = "ConfigError";
+  }
+}
+
+/** Runs one part of a loader; on failure records its problems and returns undefined. */
+type Check = <T>(part: () => T) => T;
+
+/**
+ * Runs `load`, carrying on past each failed `check` so that one start names
+ * every bad variable, then throws them together as one ConfigError.
+ */
+function collect<T>(load: (check: Check) => T): T {
+  const problems: string[] = [];
+  const check: Check = (part) => {
+    try {
+      return part();
+    } catch (err) {
+      problems.push(...(err instanceof ConfigError ? err.problems : [err instanceof Error ? err.message : String(err)]));
+      return undefined as never;
+    }
   };
+  const result = load(check);
+  if (problems.length > 0) throw new ConfigError(problems);
+  return result;
+}
+
+/** What's wrong with the configuration the given loaders read; empty when it's all valid. */
+export function configProblems(...loaders: (() => unknown)[]): string[] {
+  try {
+    collect((check) => loaders.forEach((load) => check(load)));
+    return [];
+  } catch (err) {
+    return (err as ConfigError).problems;
+  }
+}
+
+/** The startup error for `problems`, one bad variable per line. */
+export function describeConfigProblems(component: string, problems: string[]): string {
+  const settings = problems.length === 1 ? "this setting" : `these ${problems.length} settings`;
+  return `${component} can't start. Fix ${settings} in .env:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`;
+}
+
+/** Configuration from the environment (see .env.example); throws a ConfigError naming every bad variable. */
+export function loadConfig(env: Env = process.env) {
+  return collect((check) => ({
+    databaseUrl: check(() => databaseUrl(env)),
+    s3: {
+      endpoint: check(() => s3Endpoint(env)),
+      region: env.S3_REGION?.trim() || "us-east-1",
+      bucket: check(() => bucketName(env)),
+      accessKeyId: check(() => required(env, "S3_ACCESS_KEY_ID")),
+      secretAccessKey: check(() => required(env, "S3_SECRET_ACCESS_KEY")),
+    },
+    transfer: check(() => loadTransferConfig(env)),
+    expiry: check(() => loadExpiryConfig(env)),
+    upload: check(() => loadUploadConfig(env)),
+    limits: check(() => loadLimitsConfig(env)),
+    cleanup: check(() => loadCleanupConfig(env)),
+  }));
+}
+
+function databaseUrl(env: Env): string {
+  const value = required(env, "DATABASE_URL");
+  let protocol: string | undefined;
+  try {
+    protocol = new URL(value).protocol;
+  } catch {}
+  if (protocol !== "postgres:" && protocol !== "postgresql:") {
+    // Not quoted: the value holds the database password.
+    throw new Error("Invalid DATABASE_URL: use a postgres:// URL, like postgres://fireshare:password@db:5432/fireshare");
+  }
+  return value;
+}
+
+function s3Endpoint(env: Env): string {
+  const value = required(env, "S3_ENDPOINT");
+  if (!httpUrl(value)) throw new Error(`Invalid S3_ENDPOINT "${value}": use an http(s) URL, like http://storage:9000`);
+  return value;
+}
+
+const BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+
+function bucketName(env: Env): string {
+  const value = required(env, "S3_BUCKET");
+  if (!BUCKET.test(value)) {
+    throw new Error(
+      `Invalid S3_BUCKET "${value}": use 3 to 63 lowercase letters, digits, dots and hyphens, starting and ending with a letter or digit`,
+    );
+  }
+  return value;
 }
 
 export type TransferMode = "proxy" | "direct" | "auto";
@@ -39,46 +116,58 @@ export interface TransferConfig {
  * endpoint for direct transfers, or `auto` mode without `DIRECT_NETWORKS`.
  */
 export function loadTransferConfig(env: Env = process.env): TransferConfig {
-  const mode = env.TRANSFER_MODE?.trim() || "proxy";
-  if (mode !== "proxy" && mode !== "direct" && mode !== "auto") {
-    throw new Error(`Invalid TRANSFER_MODE "${mode}": use proxy, direct or auto`);
-  }
+  return collect((check) => {
+    // The checks that depend on the mode are skipped when it's invalid.
+    const mode = check((): TransferMode => {
+      const value = env.TRANSFER_MODE?.trim() || "proxy";
+      if (value !== "proxy" && value !== "direct" && value !== "auto") {
+        throw new Error(`Invalid TRANSFER_MODE "${value}": use proxy, direct or auto`);
+      }
+      return value;
+    });
 
-  const endpointValue = env.STORAGE_DIRECT_ENDPOINT?.trim();
-  let directEndpoint: string | null = null;
-  if (endpointValue) {
-    directEndpoint = httpsEndpoint(endpointValue);
-    if (!directEndpoint) {
-      throw new Error(
-        `Invalid STORAGE_DIRECT_ENDPOINT "${endpointValue}": use an https:// URL, like https://storage.lan.example.com`,
-      );
-    }
-  } else if (mode === "direct" || mode === "auto") {
-    throw new Error(
-      `Missing STORAGE_DIRECT_ENDPOINT: TRANSFER_MODE=${mode} requires an https:// URL for storage, like https://storage.lan.example.com`,
-    );
-  }
+    const directEndpoint = check(() => {
+      const value = env.STORAGE_DIRECT_ENDPOINT?.trim();
+      if (value) {
+        const endpoint = httpsEndpoint(value);
+        if (!endpoint) {
+          throw new Error(
+            `Invalid STORAGE_DIRECT_ENDPOINT "${value}": use an https:// URL, like https://storage.lan.example.com`,
+          );
+        }
+        return endpoint;
+      }
+      if (mode === "direct" || mode === "auto") {
+        throw new Error(
+          `Missing STORAGE_DIRECT_ENDPOINT: TRANSFER_MODE=${mode} requires an https:// URL for storage, like https://storage.lan.example.com`,
+        );
+      }
+      return null;
+    });
 
-  const originValue = env.APP_ORIGIN?.trim();
-  let appOrigin: string | null = null;
-  if (originValue) {
-    appOrigin = httpOrigin(originValue);
-    if (!appOrigin) {
-      throw new Error(`Invalid APP_ORIGIN "${originValue}": use an http(s) origin, like https://share.example.com`);
-    }
-  }
+    const appOrigin = check(() => {
+      const value = env.APP_ORIGIN?.trim();
+      if (!value) return null;
+      const origin = httpOrigin(value);
+      if (!origin) throw new Error(`Invalid APP_ORIGIN "${value}": use an http(s) origin, like https://share.example.com`);
+      return origin;
+    });
 
-  const directNetworks = parseNetworks(env.DIRECT_NETWORKS, "DIRECT_NETWORKS");
-  if (mode === "auto" && !directNetworks) {
-    throw new Error(
-      "Missing DIRECT_NETWORKS: TRANSFER_MODE=auto requires the networks that transfer directly, like 192.168.1.0/24,10.8.0.0/16",
-    );
-  }
-  if (mode !== "auto" && directNetworks) {
-    throw new Error(`DIRECT_NETWORKS is set but TRANSFER_MODE=${mode} would ignore it: set TRANSFER_MODE=auto or remove it`);
-  }
+    const directNetworks = check(() => {
+      const networks = parseNetworks(env.DIRECT_NETWORKS, "DIRECT_NETWORKS");
+      if (mode === "auto" && !networks) {
+        throw new Error(
+          "Missing DIRECT_NETWORKS: TRANSFER_MODE=auto requires the networks that transfer directly, like 192.168.1.0/24,10.8.0.0/16",
+        );
+      }
+      if (mode && mode !== "auto" && networks) {
+        throw new Error(`DIRECT_NETWORKS is set but TRANSFER_MODE=${mode} would ignore it: set TRANSFER_MODE=auto or remove it`);
+      }
+      return networks;
+    });
 
-  return { mode, directEndpoint, appOrigin, directNetworks };
+    return { mode, directEndpoint, appOrigin, directNetworks };
+  });
 }
 
 export interface ExpiryOption {
@@ -97,6 +186,24 @@ const UNIT_SECONDS = { h: 3600, d: 86400 };
 
 /** The expiry presets offered to uploaders; throws on any invalid value. */
 export function loadExpiryConfig(env: Env = process.env): ExpiryConfig {
+  return collect((check) => {
+    const options = check(() => expiryOptions(env));
+    const defaultValue = env.EXPIRY_DEFAULT || "7d";
+    // EXPIRY_DEFAULT can only be checked against valid options.
+    if (options) {
+      check(() => {
+        if (!options.some((option) => option.value === defaultValue)) {
+          throw new Error(
+            `Invalid EXPIRY_DEFAULT "${defaultValue}": must be one of EXPIRY_OPTIONS (${options.map((o) => o.value).join(", ")})`,
+          );
+        }
+      });
+    }
+    return { options, default: defaultValue };
+  });
+}
+
+function expiryOptions(env: Env): ExpiryOption[] {
   const list = env.EXPIRY_OPTIONS || "1d,3d,7d,14d,30d";
   const options: ExpiryOption[] = [];
   for (const entry of list.split(",")) {
@@ -113,14 +220,7 @@ export function loadExpiryConfig(env: Env = process.env): ExpiryConfig {
     }
     options.push({ value, seconds });
   }
-
-  const defaultValue = env.EXPIRY_DEFAULT || "7d";
-  if (!options.some((option) => option.value === defaultValue)) {
-    throw new Error(
-      `Invalid EXPIRY_DEFAULT "${defaultValue}": must be one of EXPIRY_OPTIONS (${options.map((o) => o.value).join(", ")})`,
-    );
-  }
-  return { options, default: defaultValue };
+  return options;
 }
 
 export interface UploadConfig {
@@ -143,22 +243,24 @@ function parseSize(value: string): number {
 
 /** How browsers upload; throws on any invalid value. */
 export function loadUploadConfig(env: Env = process.env): UploadConfig {
-  const chunkSizeValue = env.UPLOAD_CHUNK_SIZE || "64MB";
-  const chunkSize = parseSize(chunkSizeValue);
-  if (!(chunkSize >= MIN_PART_SIZE && chunkSize <= MAX_PART_SIZE)) {
-    throw new Error(
-      `Invalid UPLOAD_CHUNK_SIZE "${chunkSizeValue}": use a size from 5MB to 5GB, like 64MB`,
-    );
-  }
-
-  const parallelValue = env.UPLOAD_PARALLEL_FILES || "3";
-  const parallelFiles = /^\d+$/.test(parallelValue) ? Number(parallelValue) : NaN;
-  if (!(parallelFiles >= 1 && parallelFiles <= MAX_PARALLEL_FILES)) {
-    throw new Error(
-      `Invalid UPLOAD_PARALLEL_FILES "${parallelValue}": use a whole number from 1 to ${MAX_PARALLEL_FILES}`,
-    );
-  }
-  return { chunkSize, parallelFiles };
+  return collect((check) => ({
+    chunkSize: check(() => {
+      const value = env.UPLOAD_CHUNK_SIZE || "64MB";
+      const chunkSize = parseSize(value);
+      if (!(chunkSize >= MIN_PART_SIZE && chunkSize <= MAX_PART_SIZE)) {
+        throw new Error(`Invalid UPLOAD_CHUNK_SIZE "${value}": use a size from 5MB to 5GB, like 64MB`);
+      }
+      return chunkSize;
+    }),
+    parallelFiles: check(() => {
+      const value = env.UPLOAD_PARALLEL_FILES || "3";
+      const parallelFiles = /^\d+$/.test(value) ? Number(value) : NaN;
+      if (!(parallelFiles >= 1 && parallelFiles <= MAX_PARALLEL_FILES)) {
+        throw new Error(`Invalid UPLOAD_PARALLEL_FILES "${value}": use a whole number from 1 to ${MAX_PARALLEL_FILES}`);
+      }
+      return parallelFiles;
+    }),
+  }));
 }
 
 /** A size limit, in bytes and as written in `.env` for messages. */
@@ -184,15 +286,15 @@ export interface LimitsConfig {
 
 /** Limits and quotas; each is off when empty. Throws on any invalid value. */
 export function loadLimitsConfig(env: Env = process.env): LimitsConfig {
-  return {
-    maxShareSize: sizeLimit(env, "MAX_SHARE_SIZE"),
-    maxFilesPerShare: countLimit(env, "MAX_FILES_PER_SHARE"),
-    maxTotalStorage: sizeLimit(env, "MAX_TOTAL_STORAGE"),
-    uploadQuotaPerIp: sizeLimit(env, "UPLOAD_QUOTA_PER_IP"),
-    maxActiveSharesPerIp: countLimit(env, "MAX_ACTIVE_SHARES_PER_IP"),
-    rateLimitUpload: countLimit(env, "RATE_LIMIT_UPLOAD"),
-    rateLimitDownload: countLimit(env, "RATE_LIMIT_DOWNLOAD"),
-  };
+  return collect((check) => ({
+    maxShareSize: check(() => sizeLimit(env, "MAX_SHARE_SIZE")),
+    maxFilesPerShare: check(() => countLimit(env, "MAX_FILES_PER_SHARE")),
+    maxTotalStorage: check(() => sizeLimit(env, "MAX_TOTAL_STORAGE")),
+    uploadQuotaPerIp: check(() => sizeLimit(env, "UPLOAD_QUOTA_PER_IP")),
+    maxActiveSharesPerIp: check(() => countLimit(env, "MAX_ACTIVE_SHARES_PER_IP")),
+    rateLimitUpload: check(() => countLimit(env, "RATE_LIMIT_UPLOAD")),
+    rateLimitDownload: check(() => countLimit(env, "RATE_LIMIT_DOWNLOAD")),
+  }));
 }
 
 function sizeLimit(env: Env, name: string): SizeLimit | null {
@@ -227,10 +329,10 @@ const DURATION_SECONDS = { m: 60, h: 3600, d: 86400 };
 
 /** When the cleanup worker reclaims storage; throws on any invalid value. */
 export function loadCleanupConfig(env: Env = process.env): CleanupConfig {
-  return {
-    deleteGraceSeconds: duration(env, "DELETE_GRACE", "1h"),
-    pendingTtlSeconds: duration(env, "PENDING_TTL", "24h"),
-  };
+  return collect((check) => ({
+    deleteGraceSeconds: check(() => duration(env, "DELETE_GRACE", "1h")),
+    pendingTtlSeconds: check(() => duration(env, "PENDING_TTL", "24h")),
+  }));
 }
 
 function duration(env: Env, name: string, fallback: string): number {
@@ -260,41 +362,48 @@ const EMAIL = /^[^\s@/:]+@[^\s@/]+\.[^\s@/]+$/;
  * invalid value, and when nothing protects uploads.
  */
 export function loadAccessConfig(env: Env = process.env): AccessConfig {
-  const publicValue = env.ALLOW_PUBLIC_UPLOAD || "false";
-  if (publicValue !== "true" && publicValue !== "false") {
-    throw new Error(`Invalid ALLOW_PUBLIC_UPLOAD "${publicValue}": use true or false`);
-  }
-  const isPublic = publicValue === "true";
-  const password = env.UPLOAD_PASSWORD || null;
-  if (!isPublic && !password) {
-    throw new Error(
-      "Missing UPLOAD_PASSWORD: set an upload password, or set ALLOW_PUBLIC_UPLOAD=true to let anyone upload",
-    );
-  }
-  if (isPublic && password) {
-    throw new Error("UPLOAD_PASSWORD is set but ALLOW_PUBLIC_UPLOAD=true would ignore it: set only one of them");
-  }
+  return collect((check) => {
+    // Whether UPLOAD_PASSWORD or ABUSE_CONTACT is needed is only known when this is valid.
+    const isPublic = check(() => {
+      const value = env.ALLOW_PUBLIC_UPLOAD || "false";
+      if (value !== "true" && value !== "false") {
+        throw new Error(`Invalid ALLOW_PUBLIC_UPLOAD "${value}": use true or false`);
+      }
+      return value === "true";
+    });
 
-  let abuseReportUrl: string | null = null;
-  if (isPublic) {
-    const contact = env.ABUSE_CONTACT?.trim();
-    if (!contact) {
-      throw new Error(
-        "Missing ABUSE_CONTACT: with ALLOW_PUBLIC_UPLOAD=true, download pages link to it so people can report abuse",
-      );
-    }
-    abuseReportUrl = EMAIL.test(contact) ? `mailto:${contact}?subject=${encodeURIComponent("Abuse report")}` : httpUrl(contact);
-    if (!abuseReportUrl) {
-      throw new Error(`Invalid ABUSE_CONTACT "${contact}": use an email address or an http(s) URL`);
-    }
-  }
+    const password = env.UPLOAD_PASSWORD || null;
+    check(() => {
+      if (isPublic === false && !password) {
+        throw new Error(
+          "Missing UPLOAD_PASSWORD: set an upload password, or set ALLOW_PUBLIC_UPLOAD=true to let anyone upload",
+        );
+      }
+      if (isPublic && password) {
+        throw new Error("UPLOAD_PASSWORD is set but ALLOW_PUBLIC_UPLOAD=true would ignore it: set only one of them");
+      }
+    });
 
-  return {
-    password,
-    allowedIps: parseNetworks(env.UPLOAD_ALLOWED_IPS, "UPLOAD_ALLOWED_IPS"),
-    trustedProxies: parseNetworks(env.TRUSTED_PROXIES, "TRUSTED_PROXIES"),
-    abuseReportUrl,
-  };
+    const abuseReportUrl = check(() => {
+      if (!isPublic) return null;
+      const contact = env.ABUSE_CONTACT?.trim();
+      if (!contact) {
+        throw new Error(
+          "Missing ABUSE_CONTACT: with ALLOW_PUBLIC_UPLOAD=true, download pages link to it so people can report abuse",
+        );
+      }
+      const url = EMAIL.test(contact) ? `mailto:${contact}?subject=${encodeURIComponent("Abuse report")}` : httpUrl(contact);
+      if (!url) throw new Error(`Invalid ABUSE_CONTACT "${contact}": use an email address or an http(s) URL`);
+      return url;
+    });
+
+    return {
+      password,
+      allowedIps: check(() => parseNetworks(env.UPLOAD_ALLOWED_IPS, "UPLOAD_ALLOWED_IPS")),
+      trustedProxies: check(() => parseNetworks(env.TRUSTED_PROXIES, "TRUSTED_PROXIES")),
+      abuseReportUrl,
+    };
+  });
 }
 
 function httpUrl(value: string): string | null {
@@ -329,7 +438,7 @@ function httpOrigin(value: string): string | null {
 
 function required(env: Env, name: string): string {
   const value = env[name];
-  if (!value) throw new Error(`Missing required environment variable ${name}`);
+  if (!value) throw new Error(`Missing ${name}: it's required (see .env.example)`);
   return value;
 }
 

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  ConfigError,
+  configProblems,
+  describeConfigProblems,
   loadAccessConfig,
   loadCleanupConfig,
   loadConfig,
@@ -129,7 +132,7 @@ describe("transfer config", () => {
       loadConfig({
         DATABASE_URL: "postgres://x",
         S3_ENDPOINT: "http://x",
-        S3_BUCKET: "b",
+        S3_BUCKET: "fireshare",
         S3_ACCESS_KEY_ID: "k",
         S3_SECRET_ACCESS_KEY: "s",
         TRANSFER_MODE: "direct",
@@ -143,7 +146,7 @@ describe("transfer config", () => {
       loadConfig({
         DATABASE_URL: "postgres://x",
         S3_ENDPOINT: "http://x",
-        S3_BUCKET: "b",
+        S3_BUCKET: "fireshare",
         S3_ACCESS_KEY_ID: "k",
         S3_SECRET_ACCESS_KEY: "s",
         TRANSFER_MODE: "auto",
@@ -206,7 +209,7 @@ describe("expiry config", () => {
       loadConfig({
         DATABASE_URL: "postgres://x",
         S3_ENDPOINT: "http://x",
-        S3_BUCKET: "b",
+        S3_BUCKET: "fireshare",
         S3_ACCESS_KEY_ID: "k",
         S3_SECRET_ACCESS_KEY: "s",
         EXPIRY_DEFAULT: "2d",
@@ -307,7 +310,7 @@ describe("limits config", () => {
       loadConfig({
         DATABASE_URL: "postgres://x",
         S3_ENDPOINT: "http://x",
-        S3_BUCKET: "b",
+        S3_BUCKET: "fireshare",
         S3_ACCESS_KEY_ID: "k",
         S3_SECRET_ACCESS_KEY: "s",
         MAX_SHARE_SIZE: "lots",
@@ -398,7 +401,7 @@ describe("access config", () => {
       loadConfig({
         DATABASE_URL: "postgres://x",
         S3_ENDPOINT: "http://x",
-        S3_BUCKET: "b",
+        S3_BUCKET: "fireshare",
         S3_ACCESS_KEY_ID: "k",
         S3_SECRET_ACCESS_KEY: "s",
       }),
@@ -406,3 +409,97 @@ describe("access config", () => {
   });
 });
 
+
+describe("startup validation", () => {
+  const valid = {
+    DATABASE_URL: "postgres://fireshare:secret@db:5432/fireshare",
+    S3_ENDPOINT: "http://storage:9000",
+    S3_BUCKET: "fireshare",
+    S3_ACCESS_KEY_ID: "fireshare-app",
+    S3_SECRET_ACCESS_KEY: "s",
+    UPLOAD_PASSWORD: "p",
+  };
+
+  it("finds nothing wrong with a valid configuration", () => {
+    expect(configProblems(() => loadConfig(valid), () => loadAccessConfig(valid))).toEqual([]);
+  });
+
+  it("names every bad variable at once, not just the first", () => {
+    const env = {
+      ...valid,
+      S3_BUCKET: "",
+      UPLOAD_CHUNK_SIZE: "1MB",
+      UPLOAD_PARALLEL_FILES: "0",
+      MAX_SHARE_SIZE: "lots",
+      RATE_LIMIT_DOWNLOAD: "-1",
+      DELETE_GRACE: "soon",
+      TRANSFER_MODE: "direct",
+      UPLOAD_PASSWORD: "",
+    };
+    expect(configProblems(() => loadConfig(env), () => loadAccessConfig(env)).map((p) => p.split(/[ :]/)[1])).toEqual([
+      "S3_BUCKET",
+      "STORAGE_DIRECT_ENDPOINT",
+      "UPLOAD_CHUNK_SIZE",
+      "UPLOAD_PARALLEL_FILES",
+      "MAX_SHARE_SIZE",
+      "RATE_LIMIT_DOWNLOAD",
+      "DELETE_GRACE",
+      "UPLOAD_PASSWORD",
+    ]);
+  });
+
+  it("throws the problems together as one ConfigError", () => {
+    const error = (() => {
+      try {
+        loadConfig({ ...valid, DATABASE_URL: undefined, S3_ENDPOINT: undefined });
+      } catch (err) {
+        return err;
+      }
+    })();
+    expect(error).toBeInstanceOf(ConfigError);
+    expect((error as ConfigError).problems).toEqual([
+      "Missing DATABASE_URL: it's required (see .env.example)",
+      "Missing S3_ENDPOINT: it's required (see .env.example)",
+    ]);
+  });
+
+  it("skips the checks that depend on an invalid value", () => {
+    expect(configProblems(() => loadTransferConfig({ TRANSFER_MODE: "fast", DIRECT_NETWORKS: "10.0.0.0/8" }))).toEqual([
+      'Invalid TRANSFER_MODE "fast": use proxy, direct or auto',
+    ]);
+    expect(configProblems(() => loadExpiryConfig({ EXPIRY_OPTIONS: "1w", EXPIRY_DEFAULT: "1w" }))).toHaveLength(1);
+    expect(configProblems(() => loadAccessConfig({ ALLOW_PUBLIC_UPLOAD: "yes" }))).toEqual([
+      'Invalid ALLOW_PUBLIC_UPLOAD "yes": use true or false',
+    ]);
+  });
+
+  it("checks the database URL without repeating its password", () => {
+    for (const url of ["mysql://fireshare:hunter2@db/fireshare", "db:5432", "hunter2"]) {
+      const problems = configProblems(() => loadConfig({ ...valid, DATABASE_URL: url }));
+      expect(problems).toEqual([expect.stringMatching(/^Invalid DATABASE_URL: use a postgres:\/\/ URL/)]);
+      expect(problems[0]).not.toContain("hunter2");
+    }
+    expect(configProblems(() => loadConfig({ ...valid, DATABASE_URL: "postgresql://u:p@db/x" }))).toEqual([]);
+  });
+
+  it("checks the storage endpoint and bucket name", () => {
+    expect(configProblems(() => loadConfig({ ...valid, S3_ENDPOINT: "storage:9000" }))).toEqual([
+      'Invalid S3_ENDPOINT "storage:9000": use an http(s) URL, like http://storage:9000',
+    ]);
+    for (const bucket of ["ab", "FireShare", "fire_share", "-fireshare", "x".repeat(64)]) {
+      expect(configProblems(() => loadConfig({ ...valid, S3_BUCKET: bucket })), bucket).toEqual([
+        expect.stringMatching(/^Invalid S3_BUCKET/),
+      ]);
+    }
+    expect(configProblems(() => loadConfig({ ...valid, S3_BUCKET: "fire.share-01" }))).toEqual([]);
+  });
+
+  it("describes the problems one per line", () => {
+    expect(describeConfigProblems("FireShare", ["Missing A: x", "Invalid B: y"])).toBe(
+      "FireShare can't start. Fix these 2 settings in .env:\n  - Missing A: x\n  - Invalid B: y",
+    );
+    expect(describeConfigProblems("The cleanup worker", ["Missing A: x"])).toBe(
+      "The cleanup worker can't start. Fix this setting in .env:\n  - Missing A: x",
+    );
+  });
+});

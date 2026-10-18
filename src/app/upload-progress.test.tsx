@@ -16,7 +16,10 @@ describe("upload progress", () => {
         ]}
       />,
     );
-    expect(html).toContain("43% · 175 MB of 400 MB");
+    expect(html).toContain('aria-valuenow="43"');
+    expect(html).toContain("175 MB of 400 MB");
+    // The file in flight is described beside the dial.
+    expect(html).toContain("<strong>b.exr</strong><span>Uploading · 50%, file 2 of 4</span>");
     expect(html).toMatch(/data-status="done".*a\.exr.*Done</);
     expect(html).toMatch(/data-status="uploading".*b\.exr.*Uploading · 50%/);
     expect(html).toMatch(/data-status="retrying".*c\.exr.*Retrying… · 25%/);
@@ -27,6 +30,6 @@ describe("upload progress", () => {
     const html = renderToStaticMarkup(
       <UploadProgress progress={[{ name: "empty.txt", size: 0, sent: 0, status: "done" }]} />,
     );
-    expect(html).toContain("100%");
+    expect(html).toContain('aria-valuenow="100"');
   });
 });
