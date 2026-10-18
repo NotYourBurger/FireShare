@@ -118,17 +118,17 @@ export function pickFallbackQuote(): Quote {
 }
 
 /**
- * Fetches a random quote per request from https://zenquotes.io/api/random
- * with a timeout and graceful fallback so page loads stay fast and reliable.
+ * Fetches a random quote from https://zenquotes.io/api/random with a timeout,
+ * or null when the network or API fails or the API is rate limiting us.
  */
-export async function fetchRandomQuote(): Promise<Quote> {
+async function fetchLiveQuote(): Promise<Quote | null> {
   try {
     const res = await fetch("https://zenquotes.io/api/random", {
       cache: "no-store",
       signal: AbortSignal.timeout(3500),
       headers: { Accept: "application/json" },
     });
-    if (!res.ok) return pickFallbackQuote();
+    if (!res.ok) return null;
     const data: unknown = await res.json();
     if (Array.isArray(data) && data.length > 0 && typeof data[0] === "object" && data[0] !== null) {
       const entry = data[0] as Record<string, unknown>;
@@ -138,8 +138,60 @@ export async function fetchRandomQuote(): Promise<Quote> {
         return { quote: q, author: a || "Unknown" };
       }
     }
-    return pickFallbackQuote();
+    return null;
   } catch {
-    return pickFallbackQuote();
+    return null;
   }
+}
+
+/** Fetches a random quote from zenquotes.io, falling back to a curated one. */
+export async function fetchRandomQuote(): Promise<Quote> {
+  return (await fetchLiveQuote()) ?? pickFallbackQuote();
+}
+
+/**
+ * Quotes for page renders and /api/quote without waiting on the network: it
+ * answers at once from a pool of recently fetched quotes (curated ones until
+ * the first fetch lands), and refreshes the pool in the background at most
+ * once per `refreshMs`. ZenQuotes allows only a few requests per IP every 30s.
+ */
+export function createQuoteCache({
+  fetchQuote = fetchLiveQuote,
+  refreshMs = 60_000,
+  poolSize = 20,
+  now = Date.now,
+}: {
+  fetchQuote?: () => Promise<Quote | null>;
+  refreshMs?: number;
+  poolSize?: number;
+  now?: () => number;
+} = {}) {
+  const pool: Quote[] = [];
+  let lastRefresh = -Infinity;
+
+  function refresh() {
+    if (now() - lastRefresh < refreshMs) return;
+    lastRefresh = now();
+    void fetchQuote()
+      .then((quote) => {
+        if (!quote || pool.some((q) => q.quote === quote.quote)) return;
+        pool.push(quote);
+        if (pool.length > poolSize) pool.shift();
+      })
+      .catch(() => {});
+  }
+
+  return {
+    quote(): Quote {
+      refresh();
+      return pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : pickFallbackQuote();
+    },
+  };
+}
+
+const quoteCache = createQuoteCache();
+
+/** A quote for this request, without waiting on the network. */
+export function currentQuote(): Quote {
+  return quoteCache.quote();
 }

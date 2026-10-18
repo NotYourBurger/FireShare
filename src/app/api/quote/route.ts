@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server";
-import { fetchRandomQuote, pickRandomBackdrop } from "@/app/quote";
+import { currentQuote, pickRandomBackdrop } from "@/app/quote";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  const [quote, backdrop] = await Promise.all([fetchRandomQuote(), Promise.resolve(pickRandomBackdrop())]);
+export function GET() {
   return NextResponse.json(
-    { quote, backdrop },
+    { quote: currentQuote(), backdrop: pickRandomBackdrop() },
     { headers: { "Cache-Control": "no-store" } },
   );
 }
