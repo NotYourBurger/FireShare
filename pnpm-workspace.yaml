@@ -1,3 +1,7 @@
 onlyBuiltDependencies:
   - esbuild
+
+# Next.js image optimization isn't used (see next.config.ts), so skip its
+# native module: the Docker build installs on one platform for every image.
+ignoredOptionalDependencies:
   - sharp

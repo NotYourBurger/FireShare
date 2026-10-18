@@ -1,12 +1,16 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22-alpine AS deps
+# Dependencies and builds run on the build machine's own platform: their output
+# is platform-independent JavaScript, so only the final images below are built
+# per platform. Installing under emulation (QEMU, for arm64 in CI) was slow
+# enough to hang. Nothing native ships in the images (see pnpm-workspace.yaml).
+FROM --platform=$BUILDPLATFORM node:22-alpine AS deps
 WORKDIR /app
 RUN corepack enable
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
-FROM node:22-alpine AS build
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 WORKDIR /app
 RUN corepack enable
 ENV NEXT_TELEMETRY_DISABLED=1
