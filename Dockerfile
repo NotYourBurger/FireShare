@@ -4,13 +4,13 @@
 # is platform-independent JavaScript, so only the final images below are built
 # per platform. Installing under emulation (QEMU, for arm64 in CI) was slow
 # enough to hang. Nothing native ships in the images (see pnpm-workspace.yaml).
-FROM --platform=$BUILDPLATFORM node:22-alpine AS deps
+FROM --platform=$BUILDPLATFORM node:26-alpine AS deps
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
-FROM --platform=$BUILDPLATFORM node:22-alpine AS build
+FROM --platform=$BUILDPLATFORM node:26-alpine AS build
 WORKDIR /app
 RUN corepack enable
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -20,7 +20,7 @@ RUN pnpm build && pnpm build:worker
 
 # The cleanup worker, and the bundled storage's one-off setup (storage-init):
 # one bundled file each, built with `--target worker`.
-FROM node:22-alpine AS worker
+FROM node:26-alpine AS worker
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build --chown=node:node /app/dist/worker.cjs /app/dist/storage-init.cjs ./
@@ -28,7 +28,7 @@ USER node
 CMD ["node", "worker.cjs"]
 
 # The web app; the last stage, so it's the default target.
-FROM node:22-alpine AS runner
+FROM node:26-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
