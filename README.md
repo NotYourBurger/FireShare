@@ -5,9 +5,11 @@
 
 Self-hosted temporary file sharing: upload files, get a link, send it. People you send the link to don't need an account. Every share expires, and its files are then deleted automatically. FireShare is built for large files (up to 50 GB per share by default), and both uploads and downloads resume after interruptions.
 
-<!-- Screenshot: add docs/images/upload.png and docs/images/share.png, then uncomment.
-<p align="center"><img src="docs/images/upload.png" width="49%" alt="Upload page"> <img src="docs/images/share.png" width="49%" alt="Download page"></p>
--->
+<p align="center">
+  <img src="docs/images/upload.jpg" width="49%" alt="The upload page: a file drop area, title, expiry and message fields, and an Upload and get link button">
+  <img src="docs/images/share.jpg" width="49%" alt="A download page: the share's title and message, Download all as zip, and four files each with a Download button">
+</p>
+<p align="center"><sub>Left: the upload page. Right: what recipients see.</sub></p>
 
 - **One link per share:** a share holds one or more files. Recipients can download each file separately, or download all of them as one zip that also resumes.
 - **Expiring by design:** uploaders choose an expiry from presets you set. A share's link stops working the moment it expires or is deleted.
