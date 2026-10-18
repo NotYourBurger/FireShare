@@ -342,7 +342,7 @@ describe("HTTP API", () => {
   });
 
   it("gives the upload form the configured chunk size and parallel file count", () => {
-    expect(http.uploadOptions()).toMatchObject({ chunkSize: 8 * 1024 * 1024, parallelFiles: 2 });
+    expect(http.uploadOptions()).toMatchObject({ chunkSize: 8 * 1024 * 1024, parallelFiles: 2, direct: false });
   });
 
   describe("resumable downloads", () => {
@@ -873,6 +873,12 @@ describe("auto transfer mode", () => {
     expect(body.status).toBe(200);
     return Buffer.from(await body.arrayBuffer());
   }
+
+  it("tells the upload form which clients upload straight to storage", () => {
+    expect(autoHttp.uploadOptions(new Headers(from(LAN))).direct).toBe(true);
+    expect(autoHttp.uploadOptions(new Headers(from(INTERNET))).direct).toBe(false);
+    expect(autoHttp.uploadOptions(new Headers(from(PROXY, { "X-Forwarded-For": LAN }))).direct).toBe(true);
+  });
 
   it("uploads a LAN client's file directly, and serves it through the app to the internet", async () => {
     const data = Buffer.alloc(MIN_PART_SIZE + 4, 0x42);

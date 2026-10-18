@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import { Anton, Geist } from "next/font/google";
 import { EditorialShell } from "./editorial-shell";
 import "./globals.css";
-import { currentQuote, pickRandomBackdrop } from "./quote";
+import { currentQuote } from "./current-quote";
+import { pickRandomBackdrop } from "./quote";
 
 // Downloaded at build time and served by the app.
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });

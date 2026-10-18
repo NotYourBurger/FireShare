@@ -40,11 +40,14 @@ export function UploadForm({
   expiryDefault,
   chunkSize,
   parallelFiles,
+  direct = false,
 }: {
   expiryOptions: string[];
   expiryDefault: string;
   chunkSize: number;
   parallelFiles: number;
+  /** Whether this browser uploads straight to storage, which needs no secure context. */
+  direct?: boolean;
 }) {
   const [files, setFiles] = useState<File[]>([]);
   const [title, setTitle] = useState("");
@@ -52,6 +55,10 @@ export function UploadForm({
   const [expiry, setExpiry] = useState(expiryDefault);
   const [dragging, setDragging] = useState(false);
   const [state, setState] = useState<State>({ step: "select" });
+  // Uploads through the app hash each chunk with crypto.subtle, which browsers
+  // only provide on https:// pages and localhost. Known only in the browser.
+  const [insecure, setInsecure] = useState(false);
+  useEffect(() => setInsecure(!direct && !window.isSecureContext), [direct]);
 
   // Offer to resume an upload this browser didn't finish.
   useEffect(() => {
@@ -461,7 +468,8 @@ export function UploadForm({
           />
         </label>
         {state.error && <p className="error">Upload failed: {state.error}</p>}
-        <button className="primary-wide" disabled={files.length === 0} onClick={share}>
+        {insecure && <InsecureContextNotice />}
+        <button className="primary-wide" disabled={files.length === 0 || insecure} onClick={share}>
           Upload and get link
         </button>
       </div>
@@ -470,6 +478,16 @@ export function UploadForm({
 }
 
 /** The management link, shown this one time only. */
+/** Why uploading can't work from this page, shown before any file is picked. */
+export function InsecureContextNotice() {
+  return (
+    <p className="error" role="alert">
+      Uploading needs a secure connection. Browsers only allow it on https:// pages or on localhost, and this page is
+      plain http://. Ask whoever runs this FireShare to put it behind HTTPS. Download links still work.
+    </p>
+  );
+}
+
 export function ManagementLink({ url }: { url: string }) {
   return (
     <div className="sheet-section manage-link" role="note">

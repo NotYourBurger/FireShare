@@ -8,7 +8,8 @@ export const dynamic = "force-dynamic";
 
 export default async function Home() {
   const app = await getApp();
-  const access = app.uploadAccess(await headers());
+  const requestHeaders = await headers();
+  const access = app.uploadAccess(requestHeaders);
   return (
     <main>
       <div className="page-header-block">
@@ -17,7 +18,7 @@ export default async function Home() {
           Upload files and get one link to share them. <a href="/recent">Recent shares</a>
         </p>
       </div>
-      {access === "allowed" && <UploadForm {...app.uploadOptions()} />}
+      {access === "allowed" && <UploadForm {...app.uploadOptions(requestHeaders)} />}
       {access === "password" && <UnlockForm />}
       {access === "network" && (
         <p className="card muted">

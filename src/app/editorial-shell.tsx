@@ -112,7 +112,7 @@ export function EditorialShell({
               <div
                 className="scene-photo-image"
                 style={{
-                  backgroundImage: `url("${backdrop.localPhotoUrl}"), url("${backdrop.photoUrl}"), ${backdrop.fallbackGradient}`,
+                  backgroundImage: `url("${backdrop.localPhotoUrl}"), ${backdrop.fallbackGradient}`,
                 }}
               />
             </motion.div>

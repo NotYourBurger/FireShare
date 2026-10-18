@@ -66,7 +66,7 @@ describe("ZenQuotes integration and editorial backdrops", () => {
   it("picks a valid editorial backdrop", () => {
     const backdrop = pickRandomBackdrop();
     expect(EDITORIAL_BACKDROPS).toContainEqual(backdrop);
-    expect(backdrop.photoUrl).toMatch(/^https:\/\//);
+    expect(backdrop.localPhotoUrl).toMatch(/^\/backdrops\/[\w-]+\.jpg$/);
     expect(backdrop.colors).toHaveLength(3);
   });
 });

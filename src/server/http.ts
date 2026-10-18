@@ -83,9 +83,9 @@ export function createHttpHandlers({
    * in `direct` mode, and in `auto` mode when the trusted client IP is in
    * `DIRECT_NETWORKS`.
    */
-  function isDirect(req: Request): boolean {
+  function isDirect(headers: Pick<Headers, "get">): boolean {
     if (transfer.mode !== "auto") return transfer.mode === "direct";
-    const client = access.clientAddress(req.headers);
+    const client = access.clientAddress(headers);
     return client !== null && transfer.directNetworks!.has(client);
   }
 
@@ -153,13 +153,18 @@ export function createHttpHandlers({
       }
     },
 
-    /** Choices and settings for the upload form. */
-    uploadOptions() {
+    /**
+     * Choices and settings for the upload form, and whether this client's
+     * uploads go straight to storage (which, unlike uploading through the
+     * app, works from a page that isn't HTTPS).
+     */
+    uploadOptions(headers: Pick<Headers, "get"> = new Headers()) {
       return {
         expiryOptions: expiry.options.map((option) => option.value),
         expiryDefault: expiry.default,
         chunkSize: upload.chunkSize,
         parallelFiles: upload.parallelFiles,
+        direct: isDirect(headers),
       };
     },
 
@@ -169,7 +174,7 @@ export function createHttpHandlers({
       if (refused) return refused;
       const newShare = parseNewShare(await req.json().catch(() => null), expiry);
       if (typeof newShare === "string") return json(400, { error: newShare });
-      const direct = isDirect(req);
+      const direct = isDirect(req.headers);
       let share;
       try {
         if (direct) {
@@ -218,7 +223,7 @@ export function createHttpHandlers({
       const refused = refuseJson(req);
       if (refused) return refused;
       if (transfer.mode === "proxy") return json(405, { error: "Direct upload is not enabled" });
-      if (!isDirect(req)) return json(403, { error: DIRECT_NETWORK_ERROR });
+      if (!isDirect(req.headers)) return json(403, { error: DIRECT_NETWORK_ERROR });
       await ensureDirectCors(req);
       const direct = await shares.getDirectUpload(uploadId, upload.chunkSize);
       if (!direct) return json(404, { error: "No such upload" });
@@ -317,7 +322,7 @@ export function createHttpHandlers({
         const file = await shares.openDownload(token, fileId);
         if (file === "unavailable") return html(410, UNAVAILABLE_PAGE);
         if (!file) return html(404, NOT_FOUND_PAGE);
-        if (isDirect(req)) {
+        if (isDirect(req.headers)) {
           const location = await file.presign(contentDisposition(file.name));
           return new Response(null, {
             status: 302,

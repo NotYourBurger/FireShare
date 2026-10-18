@@ -421,6 +421,54 @@ export function loadAccessConfig(env: Env = process.env): AccessConfig {
   });
 }
 
+export interface QuotesConfig {
+  /** Whether the app fetches quotes from zenquotes.io; when false it only shows its built-in ones. */
+  live: boolean;
+}
+
+/** Where the quotes on every page come from; throws on an invalid value. */
+export function loadQuotesConfig(env: Env = process.env): QuotesConfig {
+  const value = env.QUOTES?.trim() || "live";
+  if (value !== "live" && value !== "offline") throw new ConfigError([`Invalid QUOTES "${value}": use live or offline`]);
+  return { live: value === "live" };
+}
+
+/**
+ * Settings that are valid but probably not what the operator wants, one
+ * message each, logged at startup. Assumes the configuration is valid.
+ */
+export function configWarnings(env: Env = process.env): string[] {
+  const warnings: string[] = [];
+  if (env.ALLOW_INSECURE_DIRECT_ENDPOINT === "true" && env.STORAGE_DIRECT_ENDPOINT?.trim().startsWith("http:")) {
+    warnings.push(
+      "ALLOW_INSECURE_DIRECT_ENDPOINT=true: presigned storage URLs, which grant access to files, travel unencrypted. Use this only on a network you trust.",
+    );
+  }
+  const quotas = ["UPLOAD_QUOTA_PER_IP", "MAX_ACTIVE_SHARES_PER_IP", "MAX_TOTAL_STORAGE"];
+  if (env.ALLOW_PUBLIC_UPLOAD === "true" && quotas.every((name) => !env[name]?.trim())) {
+    warnings.push(
+      `ALLOW_PUBLIC_UPLOAD=true with no quotas: anyone can fill your disk. Set at least one of ${quotas.join(", ")}.`,
+    );
+  }
+  const origin = env.APP_ORIGIN?.trim();
+  const mode = env.TRANSFER_MODE?.trim();
+  if ((mode === "direct" || mode === "auto") && !origin) {
+    warnings.push(
+      `TRANSFER_MODE=${mode} without APP_ORIGIN: storage's CORS rule then names the origin the app sees requests on, which behind a reverse proxy may not be the address people open. Set APP_ORIGIN, like https://share.example.com.`,
+    );
+  }
+  if (origin && origin.startsWith("http:") && !isLocalhost(new URL(origin).hostname)) {
+    warnings.push(
+      `APP_ORIGIN is ${origin}: browsers upload through the app only on https:// or localhost, so uploads that don't go straight to storage will fail. Put FireShare behind an HTTPS reverse proxy (see docs/deployment.md).`,
+    );
+  }
+  return warnings;
+}
+
+function isLocalhost(hostname: string): boolean {
+  return hostname === "localhost" || hostname.endsWith(".localhost") || hostname === "[::1]" || /^127\./.test(hostname);
+}
+
 function httpUrl(value: string): string | null {
   try {
     const url = new URL(value);
