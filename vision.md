@@ -14,7 +14,7 @@ Services like WeTransfer and SendGB are convenient, but your files sit on someon
 
 FireShare gives teams the same simple upload-and-share experience while keeping the files, the access rules and the limits under their own control.
 
-**First deployment:** FireDrum Studios uses FireShare to send large production files (VFX, 3D, video) between staff and clients. It is hosted on the studio's Synology NAS and reachable through a company subdomain.
+**Typical deployment:** a production studio sends large files (VFX, 3D, video) between staff and clients. FireShare runs on the studio's NAS and is reachable through a company subdomain.
 
 ---
 
@@ -118,7 +118,7 @@ FireShare gives teams the same simple upload-and-share experience while keeping 
 | Storage | Garage (default, bundled in Compose, zstd-compressed), or any S3-compatible API |
 | Deployment | Docker Compose, multi-arch images (amd64 / arm64) |
 
-**FireDrum Studios deployment:** a Synology NAS runs the stack in Container Manager with Garage on the internal network. DSM's reverse proxy provides HTTPS for the public app domain and for a LAN-only storage hostname. `TRANSFER_MODE=auto` gives studio staff direct transfers while clients go through proxy mode.
+**Example studio deployment:** a Synology NAS runs the stack in Container Manager with Garage on the internal network. DSM's reverse proxy provides HTTPS for the public app domain and for a LAN-only storage hostname. `TRANSFER_MODE=auto` gives studio staff direct transfers while clients go through proxy mode.
 
 ---
 

@@ -6,7 +6,7 @@ Self-hosted temporary file sharing. See `vision.md` for the product vision, arch
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues (private repo for now, public later), managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues are tracked in GitHub Issues, managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
