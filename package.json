@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "build:worker": "esbuild src/worker/main.ts --bundle --platform=node --target=node22 --format=cjs --external:pg-native --outfile=dist/worker.cjs",
+    "build:worker": "esbuild src/worker/main.ts --bundle --platform=node --target=node22 --format=cjs --external:pg-native --outfile=dist/worker.cjs && esbuild src/storage-init/main.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/storage-init.cjs",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

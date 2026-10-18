@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { parseNetworks, type Networks } from "./client-address";
 import { MAX_PART_SIZE, MIN_PART_SIZE } from "./storage/adapter";
 
@@ -57,8 +58,8 @@ export function loadConfig(env: Env = process.env) {
       endpoint: check(() => s3Endpoint(env)),
       region: env.S3_REGION?.trim() || "us-east-1",
       bucket: check(() => bucketName(env)),
-      accessKeyId: check(() => required(env, "S3_ACCESS_KEY_ID")),
-      secretAccessKey: check(() => required(env, "S3_SECRET_ACCESS_KEY")),
+      accessKeyId: check(() => requiredOrFile(env, "S3_ACCESS_KEY_ID")),
+      secretAccessKey: check(() => requiredOrFile(env, "S3_SECRET_ACCESS_KEY")),
     },
     transfer: check(() => loadTransferConfig(env)),
     expiry: check(() => loadExpiryConfig(env)),
@@ -83,7 +84,7 @@ function databaseUrl(env: Env): string {
 
 function s3Endpoint(env: Env): string {
   const value = required(env, "S3_ENDPOINT");
-  if (!httpUrl(value)) throw new Error(`Invalid S3_ENDPOINT "${value}": use an http(s) URL, like http://storage:9000`);
+  if (!httpUrl(value)) throw new Error(`Invalid S3_ENDPOINT "${value}": use an http(s) URL, like http://storage:3900`);
   return value;
 }
 
@@ -439,6 +440,24 @@ function httpOrigin(value: string): string | null {
 function required(env: Env, name: string): string {
   const value = env[name];
   if (!value) throw new Error(`Missing ${name}: it's required (see .env.example)`);
+  return value;
+}
+
+/**
+ * `name`, or the contents of the file `${name}_FILE` names, like the key the
+ * bundled storage's setup writes to a shared volume.
+ */
+function requiredOrFile(env: Env, name: string): string {
+  if (env[name]) return env[name];
+  const file = env[`${name}_FILE`];
+  if (!file) throw new Error(`Missing ${name}: it's required (see .env.example)`);
+  let value: string;
+  try {
+    value = readFileSync(file, "utf8").trim();
+  } catch (err) {
+    throw new Error(`Can't read ${name}_FILE "${file}": ${err instanceof Error ? err.message : err}`);
+  }
+  if (!value) throw new Error(`Invalid ${name}_FILE "${file}": the file is empty`);
   return value;
 }
 

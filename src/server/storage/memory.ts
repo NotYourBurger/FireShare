@@ -109,6 +109,11 @@ export function createMemoryStorage({
       if (uploads.get(uploadId)?.key === key) uploads.delete(uploadId);
     },
 
+    async putEmpty(key) {
+      const data = Buffer.alloc(0);
+      objects.set(key, { data, etag: md5(data) });
+    },
+
     async getReadStream(key, { range, ifMatch } = {}) {
       const object = objects.get(key);
       if (!object) throw new Error("No such object");

@@ -92,7 +92,7 @@ FireShare gives teams the same simple upload-and-share experience while keeping 
 | **Web app** (Next.js) | UI and API: upload sessions (tus), finalize, share and management pages, streaming downloads and zips, presigned URLs in direct mode |
 | **Cleanup worker** (Node.js) | Scheduled jobs: deletes expired and deleted shares after the grace period, removes abandoned pending uploads and their incomplete multipart uploads, computes CRC32s for direct-mode files |
 | **Database** (PostgreSQL) | Shares, files, chunk hashes and fingerprints, link token hashes, quota counters |
-| **Object storage** (S3 API) | The file bytes: RustFS by default, or any S3-compatible service |
+| **Object storage** (S3 API) | The file bytes: Garage by default, or any S3-compatible service |
 
 ### Design principles
 
@@ -101,7 +101,7 @@ FireShare gives teams the same simple upload-and-share experience while keeping 
 - **Streams, never buffers:** in proxy mode, app memory stays flat no matter how big the file is.
 - **All or nothing:** a share is either complete and verified, or it doesn't exist.
 - **Stateless app:** all state lives in PostgreSQL and storage. App containers can be rebuilt, updated or moved without losing data.
-- **Storage adapter:** all storage access goes through one interface (`createUpload`, `writePart`, `completeUpload`, `getReadStream`, `getPresignedUrl`, `head`, `delete`). The v1 driver is `s3`.
+- **Storage adapter:** all storage access goes through one interface (`createUpload`, `writePart`, `completeUpload`, `putEmpty`, `getReadStream`, `getPresignedUrl`, `head`, `delete`). The v1 driver is `s3`.
 - **Expiry enforced twice:** links are checked at download time; the cleanup worker only reclaims disk space.
 - **Configuration through environment:** one `.env` file defines domains, secrets, transfer mode, limits and storage.
 
@@ -115,10 +115,10 @@ FireShare gives teams the same simple upload-and-share experience while keeping 
 | Resumable uploads | tus protocol (tus server in the app, tus client in the browser) |
 | Worker | Node.js |
 | Database | PostgreSQL |
-| Storage | RustFS (default, bundled in Compose), or any S3-compatible API |
+| Storage | Garage (default, bundled in Compose, zstd-compressed), or any S3-compatible API |
 | Deployment | Docker Compose, multi-arch images (amd64 / arm64) |
 
-**FireDrum Studios deployment:** a Synology NAS runs the stack in Container Manager with RustFS on the internal network. DSM's reverse proxy provides HTTPS for the public app domain and for a LAN-only storage hostname. `TRANSFER_MODE=auto` gives studio staff direct transfers while clients go through proxy mode.
+**FireDrum Studios deployment:** a Synology NAS runs the stack in Container Manager with Garage on the internal network. DSM's reverse proxy provides HTTPS for the public app domain and for a LAN-only storage hostname. `TRANSFER_MODE=auto` gives studio staff direct transfers while clients go through proxy mode.
 
 ---
 
@@ -198,7 +198,7 @@ Storage needed levels off at roughly **daily upload volume × average retention 
 - Upload password, IP allowlist, limits and quotas set in `.env`
 - Cleanup worker (expiry with grace period, abandoned uploads)
 - Always-on security layer
-- Docker Compose with RustFS, `.env.example`, multi-arch images
+- Docker Compose with Garage, `.env.example`, multi-arch images
 
 **v1.1: Accounts**
 - Optional user accounts (invite-only by default, `ALLOW_SIGNUP=false`); signed-in users skip the upload password
@@ -222,6 +222,6 @@ Storage needed levels off at roughly **daily upload volume × average retention 
 
 ## Decisions
 
-- **Storage server:** RustFS (Apache-2.0, 1.0 GA in September 2026). It is light enough for a NAS and is bundled in the Compose file. Any other S3-compatible service works through the same adapter.
+- **Storage server:** Garage (AGPL-3.0, run unmodified as a separate container), with zstd compression at level 1. Measured against RustFS on the same Compose stack, Garage uses about 4 MiB of memory idle instead of 160 MiB, and about 320 MiB instead of 480 MiB with ten downloads at once, which matters on a 2 GB NAS. The cost is CPU: it uses roughly twice as much as RustFS per byte moved (zstd accounts for about a fifth of its share on incompressible files), and single large downloads are somewhat slower. zstd halves the disk used by compressible files and leaves already-compressed video at its size. Any other S3-compatible service works through the same adapter.
 - **License:** MIT.
 - **Default limits:** see Limits and quotas above.
