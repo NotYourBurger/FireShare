@@ -32,4 +32,17 @@ describe("upload progress", () => {
     );
     expect(html).toContain('aria-valuenow="100"');
   });
+
+  it("pads indices to 3 digits when uploading 100 files", () => {
+    const progress = Array.from({ length: 100 }, (_, i) => ({
+      name: `frame_${String(i + 1).padStart(4, "0")}.png`,
+      size: MB,
+      sent: i < 50 ? MB : 0,
+      status: (i < 50 ? "done" : i === 50 ? "uploading" : "waiting") as "done" | "uploading" | "waiting",
+    }));
+    const html = renderToStaticMarkup(<UploadProgress progress={progress} />);
+    expect(html).toContain('<span class="row-index" aria-hidden="true">001</span>');
+    expect(html).toContain('<span class="row-index" aria-hidden="true">100</span>');
+    expect(html).toContain("file 51 of 100");
+  });
 });
