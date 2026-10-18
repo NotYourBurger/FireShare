@@ -293,7 +293,10 @@ export function UploadForm({
         </div>
         <ul className="rows">
           {pending.files.map((file, i) => (
-            <li key={i} className="row">
+            <li key={i} className="row row-progress">
+              <span className="row-index" aria-hidden="true">
+                {String(i + 1).padStart(Math.max(2, String(pending.files.length).length), "0")}
+              </span>
               <span className="row-name">{file.name}</span>
               <span className="row-meta">
                 {offsets[i] >= file.size
@@ -326,6 +329,7 @@ export function UploadForm({
   }
 
   const totalSelectedBytes = files.reduce((sum, file) => sum + file.size, 0);
+  const padDigits = Math.max(2, String(files.length).length);
 
   return (
     <motion.div
@@ -378,28 +382,49 @@ export function UploadForm({
 
       <AnimatePresence initial={false}>
         {files.length > 0 && (
-          <motion.ul
-            className="rows"
+          <motion.div
+            className="rows-section"
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
             transition={{ duration: 0.3, ease: EASE_OUT_EXPO }}
           >
-            {files.map((file, i) => (
-              <li key={`${file.name}-${file.size}-${i}`} className="row">
-                <span className="row-name">{file.name}</span>
-                <span className="row-meta">{formatBytes(file.size)}</span>
+            {files.length > 1 && (
+              <div className="rows-bar">
+                <span className="rows-summary">
+                  {files.length} files · {formatBytes(totalSelectedBytes)}
+                </span>
                 <button
-                  className="icon"
-                  onClick={() => setFiles((current) => current.filter((_, j) => j !== i))}
-                  aria-label={`Remove ${file.name}`}
-                  title="Remove"
+                  type="button"
+                  className="quiet rows-clear"
+                  onClick={() => setFiles([])}
+                  aria-label="Clear all selected files"
                 >
-                  <CrossIcon />
+                  Clear all
                 </button>
-              </li>
-            ))}
-          </motion.ul>
+              </div>
+            )}
+            <ul className="rows">
+              {files.map((file, i) => (
+                <li key={`${file.name}-${file.size}-${i}`} className="row row-selected">
+                  <span className="row-index" aria-hidden="true">
+                    {String(i + 1).padStart(padDigits, "0")}
+                  </span>
+                  <span className="row-name">{file.name}</span>
+                  <span className="row-meta">{formatBytes(file.size)}</span>
+                  <button
+                    type="button"
+                    className="icon"
+                    onClick={() => setFiles((current) => current.filter((_, j) => j !== i))}
+                    aria-label={`Remove ${file.name}`}
+                    title="Remove"
+                  >
+                    <CrossIcon />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </motion.div>
         )}
       </AnimatePresence>
 
@@ -462,6 +487,7 @@ export function ManagementLink({ url }: { url: string }) {
 
 /** The dial for the whole upload, then each file's state. */
 export function UploadProgress({ progress, stopped = false }: { progress: FileProgress[]; stopped?: boolean }) {
+  const padDigits = Math.max(2, String(progress.length).length);
   return (
     <>
       <UploadDial progress={progress} stopped={stopped} />
@@ -469,7 +495,7 @@ export function UploadProgress({ progress, stopped = false }: { progress: FilePr
         {progress.map((file, i) => (
           <li key={i} className="row row-progress" data-status={file.status}>
             <span className="row-index" aria-hidden="true">
-              {String(i + 1).padStart(2, "0")}
+              {String(i + 1).padStart(padDigits, "0")}
             </span>
             <span className="row-name">{file.name}</span>
             <span className="row-meta">{fileStatusText(file)}</span>

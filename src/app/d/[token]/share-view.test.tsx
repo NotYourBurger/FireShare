@@ -59,4 +59,18 @@ describe("recipient page", () => {
     expect(html).toContain("This link is no longer available");
     expect(html).not.toContain("Download");
   });
+
+  it("pads file indices uniformly when rendering a 100-file sequence", () => {
+    const files = Array.from({ length: 100 }, (_, i) => ({
+      id: `file-${i + 1}`,
+      name: `frame_${String(i + 1).padStart(4, "0")}.png`,
+      size: 250_000,
+    }));
+    const html = render({ title: "Render sequence", message: null, files, downloadAll: true });
+    expect(html).toContain("100 files · 25 MB");
+    expect(html).toContain('<span class="file-index" aria-hidden="true">001</span>');
+    expect(html).toContain('<span class="file-index" aria-hidden="true">100</span>');
+    expect(html).toContain("frame_0001.png");
+    expect(html).toContain("frame_0100.png");
+  });
 });

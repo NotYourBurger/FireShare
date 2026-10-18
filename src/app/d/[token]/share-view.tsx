@@ -14,6 +14,7 @@ export function ShareView({
 }) {
   const total = share.files.reduce((sum, file) => sum + file.size, 0);
   const count = share.files.length === 1 ? "1 file" : `${share.files.length} files`;
+  const padDigits = Math.max(2, String(share.files.length).length);
   return (
     <main>
       <div className="page-heading">
@@ -34,7 +35,7 @@ export function ShareView({
         {share.files.map((file, i) => (
           <li key={file.id}>
             <span className="file-index" aria-hidden="true">
-              {String(i + 1).padStart(2, "0")}
+              {String(i + 1).padStart(padDigits, "0")}
             </span>
             <div className="file-info">
               <span className="file-name">{file.name}</span>
