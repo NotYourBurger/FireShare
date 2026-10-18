@@ -29,8 +29,8 @@ const drivers: [string, () => Promise<TestDriver>][] = [
   ],
 ];
 
-// Runs against a real S3 API (e.g. RustFS) when one is configured:
-// TEST_S3_ENDPOINT=http://localhost:9000 TEST_S3_ACCESS_KEY_ID=… TEST_S3_SECRET_ACCESS_KEY=…
+// Runs against a real S3 API (e.g. Garage) when one is configured:
+// TEST_S3_ENDPOINT=http://localhost:3900 TEST_S3_REGION=garage TEST_S3_ACCESS_KEY_ID=… TEST_S3_SECRET_ACCESS_KEY=…
 if (process.env.TEST_S3_ENDPOINT) {
   drivers.push([
     "s3",
@@ -80,14 +80,13 @@ describe.each(drivers)("%s storage driver", (_name, create) => {
     );
   });
 
-  it("stores an empty file as a single empty part", async () => {
+  it("stores an empty file", async () => {
     const { storage } = await create();
     const key = randomUUID();
-    const { uploadId } = await storage.createUpload(key);
-    const part = await storage.writePart(key, uploadId, 1, Readable.from([]), 0);
-    await storage.completeUpload(key, uploadId, [part]);
+    await storage.putEmpty(key, "text/plain");
 
     expect(await storage.head(key)).toMatchObject({ size: 0 });
+    expect(await buffer(await storage.getReadStream(key))).toHaveLength(0);
   });
 
   it("reports missing objects as null and deletes objects", async () => {
@@ -219,12 +218,19 @@ describe.each(drivers)("%s storage driver", (_name, create) => {
     expect(allowed.status).toBe(200);
     expect(allowed.headers.get("Access-Control-Allow-Origin")).toBe("https://share.example.com");
 
+    // A failed preflight blocks the browser whatever its headers say (Garage adds a `*` to it).
     const blocked = await fetch(objectUrl, {
       method: "OPTIONS",
       headers: { Origin: "https://other.example.com", "Access-Control-Request-Method": "PUT" },
     });
     expect(blocked.status).toBe(403);
-    expect(blocked.headers.get("Access-Control-Allow-Origin")).toBeNull();
+
+    // A request that needs no preflight still gets no permission to read the response.
+    await storage.putEmpty(key);
+    const read = await fetch(await storage.getPresignedUrl({ action: "getObject", key }), {
+      headers: { Origin: "https://other.example.com" },
+    });
+    expect(read.headers.get("Access-Control-Allow-Origin")).toBeNull();
   });
 });
 

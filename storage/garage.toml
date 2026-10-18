@@ -1,0 +1,30 @@
+# Garage, the bundled S3-compatible storage: one node, one copy of each file.
+# Its secrets come from .env through compose.yaml: GARAGE_RPC_SECRET and
+# GARAGE_ADMIN_TOKEN.
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+
+# LMDB is Garage's default and fastest metadata store. It can be damaged by
+# an unclean shutdown, so a snapshot is kept to recover from.
+db_engine = "lmdb"
+metadata_auto_snapshot_interval = "6h"
+
+replication_factor = 1
+
+# Files are stored in blocks, each compressed with zstd at level 1, the
+# fastest. It saves disk on compressible files (3D scenes, EXR, project
+# files); already compressed video and archives stay about the same size.
+compression_level = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+# compose.yaml sends this region to the app and the worker.
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+
+# Used only by the one-off storage-init container, over the internal network.
+[admin]
+api_bind_addr = "[::]:3903"

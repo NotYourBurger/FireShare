@@ -3,11 +3,13 @@
 # Database and storage settings shared by the app and the cleanup worker.
 x-backend-env: &backend-env
   DATABASE_URL: postgres://fireshare:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/fireshare
-  S3_ENDPOINT: http://storage:9000
-  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_ENDPOINT: http://storage:3900
+  # Must match s3_region in storage/garage.toml.
+  S3_REGION: garage
   S3_BUCKET: ${S3_BUCKET:-fireshare}
-  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
-  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
+  # The app's own storage key, created by storage-init.
+  S3_ACCESS_KEY_ID_FILE: /credentials/s3-access-key-id
+  S3_SECRET_ACCESS_KEY_FILE: /credentials/s3-secret-access-key
 
 # Every container runs as a non-root user, can't gain privileges (no setuid),
 # holds no Linux capabilities, and has a memory limit.
@@ -46,6 +48,8 @@ services:
       DIRECT_NETWORKS: ${DIRECT_NETWORKS:-}
     ports:
       - "${APP_PORT:-3000}:3000"
+    volumes:
+      - storage-credentials:/credentials:ro
     depends_on:
       db:
         condition: service_healthy
@@ -67,6 +71,8 @@ services:
       <<: *backend-env
       DELETE_GRACE: ${DELETE_GRACE:-}
       PENDING_TTL: ${PENDING_TTL:-}
+    volumes:
+      - storage-credentials:/credentials:ro
     depends_on:
       db:
         condition: service_healthy
@@ -97,77 +103,57 @@ services:
       retries: 10
     networks: [internal]
 
-  # Object storage. Deliberately publishes no ports: the S3 API is reachable
-  # only over the internal network, and the console is off. The root key is
-  # used only by storage-init; the app and worker get their own key.
+  # Gives the storage volumes to the non-root user (1000) that Garage,
+  # storage-init, the app and the worker run as, then exits. It holds only
+  # CAP_CHOWN, and changes just the two top-level directories.
+  storage-volumes:
+    image: ghcr.io/notyourburger/fireshare-worker:${FIRESHARE_VERSION:-latest}
+    restart: "no"
+    <<: *hardening
+    cap_add: [CHOWN]
+    user: root
+    mem_limit: 32m
+    entrypoint: ["chown", "1000:1000", "/var/lib/garage", "/credentials"]
+    volumes:
+      - storage-data:/var/lib/garage
+      - storage-credentials:/credentials
+    network_mode: none
+
+  # Object storage: Garage, with zstd compression (see storage/garage.toml).
+  # Deliberately publishes no ports: the S3 API and the admin API are
+  # reachable only over the internal network. The admin token is used only by
+  # storage-init; the app and worker get their own key.
   storage:
-    image: rustfs/rustfs:1.0.1
+    image: dxflrs/garage:v2.4.1
     restart: unless-stopped
     <<: *hardening
-    mem_limit: 1g
+    user: "1000:1000"
+    mem_limit: 512m
     environment:
-      RUSTFS_ACCESS_KEY: ${RUSTFS_ROOT_ACCESS_KEY:?set RUSTFS_ROOT_ACCESS_KEY in .env}
-      RUSTFS_SECRET_KEY: ${RUSTFS_ROOT_SECRET_KEY:?set RUSTFS_ROOT_SECRET_KEY in .env}
-      RUSTFS_CONSOLE_ENABLE: "false"
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?set GARAGE_RPC_SECRET in .env}
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN:?set GARAGE_ADMIN_TOKEN in .env}
     volumes:
-      - storage-data:/data
+      - ./storage/garage.toml:/etc/garage.toml:ro
+      - storage-data:/var/lib/garage
+    depends_on:
+      storage-volumes:
+        condition: service_completed_successfully
     networks: [internal]
 
-  # Runs on every start, then exits: creates the private bucket, and the app's
-  # key (S3_ACCESS_KEY_ID) with a policy that allows only what FireShare does,
-  # and only in that bucket. Re-running it applies a changed secret or bucket.
+  # Runs on every start, then exits: gives the storage node its role, creates
+  # the private bucket, and creates the app's key, allowed into that bucket
+  # only, and writes it where the app and the worker read it.
   storage-init:
-    image: rustfs/rc:v0.1.36
+    image: ghcr.io/notyourburger/fireshare-worker:${FIRESHARE_VERSION:-latest}
     restart: "no"
     <<: *hardening
     mem_limit: 128m
+    command: ["node", "storage-init.cjs"]
     environment:
-      ROOT_ACCESS_KEY: ${RUSTFS_ROOT_ACCESS_KEY:?set RUSTFS_ROOT_ACCESS_KEY in .env}
-      ROOT_SECRET_KEY: ${RUSTFS_ROOT_SECRET_KEY:?set RUSTFS_ROOT_SECRET_KEY in .env}
-      APP_ACCESS_KEY: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
-      APP_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
-      BUCKET: ${S3_BUCKET:-fireshare}
-    entrypoint: ["/bin/sh", "-euc"]
-    command:
-      - |
-        if [ "$$APP_ACCESS_KEY" = "$$ROOT_ACCESS_KEY" ]; then
-          echo "S3_ACCESS_KEY_ID must differ from RUSTFS_ROOT_ACCESS_KEY: the app gets its own, limited key" >&2
-          exit 1
-        fi
-        tries=0
-        until rc alias set root http://storage:9000 "$$ROOT_ACCESS_KEY" "$$ROOT_SECRET_KEY" >/dev/null 2>&1; do
-          tries=$$((tries + 1))
-          if [ "$$tries" -ge 60 ]; then
-            echo "Storage didn't accept RUSTFS_ROOT_ACCESS_KEY and RUSTFS_ROOT_SECRET_KEY within 60s" >&2
-            exit 1
-          fi
-          sleep 1
-        done
-
-        rc bucket create --ignore-existing "root/$$BUCKET"
-        rc bucket anonymous set private "root/$$BUCKET"
-
-        cat > /tmp/policy.json <<EOF
-        {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Action": ["s3:ListBucket", "s3:ListBucketMultipartUploads", "s3:GetBucketLocation", "s3:GetBucketCors", "s3:PutBucketCors"],
-              "Resource": ["arn:aws:s3:::$$BUCKET"]
-            },
-            {
-              "Effect": "Allow",
-              "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
-              "Resource": ["arn:aws:s3:::$$BUCKET/*"]
-            }
-          ]
-        }
-        EOF
-        rc admin policy create root fireshare-app /tmp/policy.json
-        rc admin user add root "$$APP_ACCESS_KEY" "$$APP_SECRET_KEY"
-        rc admin policy attach root fireshare-app --user "$$APP_ACCESS_KEY"
-        echo "Storage ready: bucket $$BUCKET is private, and $$APP_ACCESS_KEY can access only it"
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN:?set GARAGE_ADMIN_TOKEN in .env}
+      S3_BUCKET: ${S3_BUCKET:-fireshare}
+    volumes:
+      - storage-credentials:/credentials
     depends_on:
       storage:
         condition: service_started
@@ -182,3 +168,4 @@ networks:
 volumes:
   db-data: {}
   storage-data: {}
+  storage-credentials: {}

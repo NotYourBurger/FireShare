@@ -18,11 +18,12 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN pnpm build && pnpm build:worker
 
-# The cleanup worker: one bundled file, built with `--target worker`.
+# The cleanup worker, and the bundled storage's one-off setup (storage-init):
+# one bundled file each, built with `--target worker`.
 FROM node:22-alpine AS worker
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=build --chown=node:node /app/dist/worker.cjs ./
+COPY --from=build --chown=node:node /app/dist/worker.cjs /app/dist/storage-init.cjs ./
 USER node
 CMD ["node", "worker.cjs"]
 
