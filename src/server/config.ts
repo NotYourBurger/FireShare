@@ -104,7 +104,10 @@ export type TransferMode = "proxy" | "direct" | "auto";
 
 export interface TransferConfig {
   mode: TransferMode;
-  /** HTTPS URL where browsers reach storage in `direct` and `auto` modes; null in `proxy` mode. */
+  /**
+   * HTTPS URL where browsers reach storage in `direct` and `auto` modes (or
+   * HTTP with `ALLOW_INSECURE_DIRECT_ENDPOINT=true`); null in `proxy` mode.
+   */
   directEndpoint: string | null;
   /** The app's own origin for the bucket's CORS rule, when set in `.env`. */
   appOrigin: string | null;
@@ -127,13 +130,24 @@ export function loadTransferConfig(env: Env = process.env): TransferConfig {
       return value;
     });
 
+    // For local-only deployments: presigned URLs then travel unencrypted.
+    const allowInsecure = check(() => {
+      const value = env.ALLOW_INSECURE_DIRECT_ENDPOINT || "false";
+      if (value !== "true" && value !== "false") {
+        throw new Error(`Invalid ALLOW_INSECURE_DIRECT_ENDPOINT "${value}": use true or false`);
+      }
+      return value === "true";
+    });
+
     const directEndpoint = check(() => {
       const value = env.STORAGE_DIRECT_ENDPOINT?.trim();
       if (value) {
-        const endpoint = httpsEndpoint(value);
+        const endpoint = directStorageEndpoint(value, allowInsecure);
         if (!endpoint) {
           throw new Error(
-            `Invalid STORAGE_DIRECT_ENDPOINT "${value}": use an https:// URL, like https://storage.lan.example.com`,
+            allowInsecure
+              ? `Invalid STORAGE_DIRECT_ENDPOINT "${value}": use an http(s):// URL, like http://192.168.1.10:3900`
+              : `Invalid STORAGE_DIRECT_ENDPOINT "${value}": use an https:// URL, like https://storage.lan.example.com, or set ALLOW_INSECURE_DIRECT_ENDPOINT=true for a local-only http:// endpoint`,
           );
         }
         return endpoint;
@@ -416,10 +430,11 @@ function httpUrl(value: string): string | null {
   }
 }
 
-function httpsEndpoint(value: string): string | null {
+function directStorageEndpoint(value: string, allowInsecure: boolean): string | null {
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) return null;
+    const protocolOk = url.protocol === "https:" || (allowInsecure && url.protocol === "http:");
+    if (!protocolOk || url.username || url.password || url.search || url.hash) return null;
     return url.href.replace(/\/$/, "");
   } catch {
     return null;
