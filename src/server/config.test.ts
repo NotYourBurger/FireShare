@@ -117,6 +117,36 @@ describe("transfer config", () => {
     );
   });
 
+  it("accepts an http:// STORAGE_DIRECT_ENDPOINT only with ALLOW_INSECURE_DIRECT_ENDPOINT=true", () => {
+    expect(
+      loadTransferConfig({
+        TRANSFER_MODE: "direct",
+        STORAGE_DIRECT_ENDPOINT: "http://192.168.1.10:3900/",
+        ALLOW_INSECURE_DIRECT_ENDPOINT: "true",
+      }).directEndpoint,
+    ).toBe("http://192.168.1.10:3900");
+    expect(() =>
+      loadTransferConfig({
+        TRANSFER_MODE: "direct",
+        STORAGE_DIRECT_ENDPOINT: "http://192.168.1.10:3900",
+        ALLOW_INSECURE_DIRECT_ENDPOINT: "false",
+      }),
+    ).toThrow(/^Invalid STORAGE_DIRECT_ENDPOINT/);
+    expect(() =>
+      loadTransferConfig({
+        TRANSFER_MODE: "direct",
+        STORAGE_DIRECT_ENDPOINT: "ftp://192.168.1.10",
+        ALLOW_INSECURE_DIRECT_ENDPOINT: "true",
+      }),
+    ).toThrow(/^Invalid STORAGE_DIRECT_ENDPOINT/);
+  });
+
+  it("rejects an invalid ALLOW_INSECURE_DIRECT_ENDPOINT", () => {
+    expect(() => loadTransferConfig({ ALLOW_INSECURE_DIRECT_ENDPOINT: "yes" })).toThrow(
+      /^Invalid ALLOW_INSECURE_DIRECT_ENDPOINT/,
+    );
+  });
+
   it.each(["lan", "s3", "DIRECT", "true"])("rejects TRANSFER_MODE=%s", (mode) => {
     expect(() => loadTransferConfig({ TRANSFER_MODE: mode, STORAGE_DIRECT_ENDPOINT: "https://s3.lan" })).toThrow(
       /^Invalid TRANSFER_MODE/,
