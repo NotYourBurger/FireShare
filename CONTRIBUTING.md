@@ -7,7 +7,7 @@ Thanks for helping! Bug reports, docs fixes and pull requests are all welcome.
 
 ## Setup
 
-You need Node.js 22, pnpm (`corepack enable` gives you the version pinned in `package.json`) and Docker.
+You need Node.js 26, pnpm (`npm install -g corepack && corepack enable` gives you the version pinned in `package.json`) and Docker.
 
 ```sh
 pnpm install

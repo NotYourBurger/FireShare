@@ -6,13 +6,15 @@
 # enough to hang. Nothing native ships in the images (see pnpm-workspace.yaml).
 FROM --platform=$BUILDPLATFORM node:26-alpine AS deps
 WORKDIR /app
-RUN corepack enable
+# Node 25+ no longer bundles Corepack, so install it to get the pnpm version
+# pinned in package.json's packageManager.
+RUN npm install -g corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 FROM --platform=$BUILDPLATFORM node:26-alpine AS build
 WORKDIR /app
-RUN corepack enable
+RUN npm install -g corepack@0.36.0 && corepack enable
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
