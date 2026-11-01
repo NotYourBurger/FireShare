@@ -126,7 +126,7 @@ services:
   # reachable only over the internal network. The admin token is used only by
   # storage-init; the app and worker get their own key.
   storage:
-    image: dxflrs/garage:v2.4.1
+    image: dxflrs/garage:v2.5.0
     restart: unless-stopped
     <<: *hardening
     user: "1000:1000"
